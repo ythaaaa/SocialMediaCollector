@@ -5,6 +5,7 @@ from pathlib import Path
 
 from src.downloader import DownloadEngine
 from src.models import TaskConfig
+from src.utils.paths import application_data_directory
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Pinterest Local Downloader")
@@ -16,7 +17,7 @@ def main() -> None:
     parser.add_argument("--interval", type=float, default=1.0)
     args = parser.parse_args()
     config = TaskConfig(args.keyword, args.count, args.output, args.min_width, args.min_height, args.interval)
-    engine = DownloadEngine(config, Path("browser-data"), print)
+    engine = DownloadEngine(config, application_data_directory() / "browser-data", print)
     task_dir = engine.run()
     print(f"任务目录：{task_dir}")
 

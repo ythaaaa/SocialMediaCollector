@@ -55,7 +55,11 @@ class DownloadEngine:
                     self._download_one(client, candidate.image_url, candidate.pin_url, store, known)
                     self._emit()
                     if self.config.interval_seconds: time.sleep(self.config.interval_seconds)
+            store.complete(self.stats, self.stop_event.is_set())
             self._emit("已停止" if self.stop_event.is_set() else "任务完成")
+        except Exception as exc:
+            store.complete(self.stats, self.stop_event.is_set(), str(exc))
+            raise
         finally:
             collector.close()
         return self.task_dir

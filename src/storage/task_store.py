@@ -36,6 +36,16 @@ class TaskStore:
         with target.open("a", newline="", encoding="utf-8-sig") as f:
             csv.DictWriter(f, fieldnames=self.fields).writerow(record.row())
 
+    def complete(self, stats: object, stopped: bool, error: str = "") -> None:
+        path = self.task_dir / "task.json"
+        data = json.loads(path.read_text(encoding="utf-8"))
+        data["completed_at"] = datetime.now().isoformat(timespec="seconds")
+        data["stopped"] = stopped
+        if error:
+            data["error"] = error
+        data["result"] = {key: getattr(stats, key) for key in ("discovered", "downloaded", "skipped", "failed")}
+        path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+
     def known_hashes(self) -> set[str]:
         if not self.metadata_path.exists():
             return set()

@@ -7,5 +7,7 @@ dist/
 *.spec
 browser-data/
 downloads/
+验证 输出/
+EXE 验证 输出/
 *.log
 .env

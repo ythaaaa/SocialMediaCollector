@@ -4,13 +4,13 @@ Windows 本地 Pinterest 图片下载工具。它通过可见的 Pinterest 搜�
 
 ## 环境与安装
 
-本机可用 `py.exe` 时，在项目目录执行：
+在项目目录执行（若 `py -3.12` 未识别，改用 Python 安装目录中的 `python.exe`）：
 
 ```powershell
-py -3 -m venv .venv
+py -3.12 -m venv .venv
 .\.venv\Scripts\Activate.ps1
-py -3 -m pip install -r requirements.txt
-py -3 -m playwright install chromium
+.\.venv\Scripts\python.exe -m pip install -r requirements.txt
+.\.venv\Scripts\playwright.exe install chromium
 ```
 
 如遇 PowerShell 执行策略限制，运行 `Set-ExecutionPolicy -Scope Process Bypass` 后重新激活虚拟环境。
@@ -20,16 +20,16 @@ py -3 -m playwright install chromium
 图形界面：
 
 ```powershell
-py -3 app.py
+.\.venv\Scripts\python.exe app.py
 ```
 
 命令行核心（用于小规模验证）：
 
 ```powershell
-py -3 -m src.downloader.cli "东方古风美女" --count 20 --output "D:\Pinterest素材"
+.\.venv\Scripts\python.exe -m src.downloader.cli "东方古风美女" --count 20 --output "D:\Pinterest素材"
 ```
 
-首次任务会打开可见浏览器。请自行登录 Pinterest；登录状态只保存在项目的 `browser-data/`，不会收集账号密码。出现验证码或访问限制时，请在浏览器内处理后再继续；软件不会绕过限制。
+首次任务会打开可见浏览器。请自行登录 Pinterest；登录状态只保存在 `%LOCALAPPDATA%\\PinterestLocalDownloader\\browser-data`，不会收集账号密码。出现验证码或访问限制时，请在浏览器内处理后再继续；软件不会绕过限制。若 Playwright Chromium 尚未安装但 Windows 已有 Chrome，程序会使用 Chrome 作为回退。
 
 ## 输出
 
@@ -38,7 +38,7 @@ py -3 -m src.downloader.cli "东方古风美女" --count 20 --output "D:\Pintere
 ## 测试
 
 ```powershell
-py -3 -m pytest -q
+.\.venv\Scripts\python.exe -m pytest -q
 ```
 
 ## 打包 EXE

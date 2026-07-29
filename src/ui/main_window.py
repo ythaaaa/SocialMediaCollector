@@ -9,6 +9,7 @@ from PySide6.QtWidgets import (QApplication, QDoubleSpinBox, QFileDialog, QFormL
 
 from src.downloader import DownloadEngine
 from src.models import TaskConfig, TaskStats
+from src.utils.paths import application_data_directory
 
 
 class Worker(QThread):
@@ -51,7 +52,7 @@ class MainWindow(QMainWindow):
         try:
             config = TaskConfig(self.keyword.text(), self.count.value(), Path(self.output.text()), self.min_width.value(), self.min_height.value(), self.interval.value()); config.validate(); config.output_root.mkdir(parents=True, exist_ok=True)
         except (ValueError, OSError) as exc: QMessageBox.warning(self, "无法开始", str(exc)); return
-        profile = Path(__file__).resolve().parents[2] / "browser-data"
+        profile = application_data_directory() / "browser-data"
         self.worker = Worker(config, profile); self.worker.log.connect(self.append_log); self.worker.stats.connect(self.update_stats); self.worker.done.connect(self.task_done); self.worker.failed.connect(self.task_failed); self._set_running(True); self.worker.start()
     def pause_task(self) -> None:
         if self.worker: self.worker.engine.pause(); self.append_log("任务已暂停。"); self.status.setText("已暂停")
