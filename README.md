@@ -91,20 +91,22 @@ GUI 的“打开浏览器 / 登录”入口会直接启动本机普通 `chrome.e
 
 ## 当前进度记录
 
-* Phase：多平台采集扩展稳定版本固化；当前 Gate：人工验收 PASS，已完成本地 checkpoint
-* 开发前基线 commit：`7571b55ef6e7ad51ee22ac62a53b2d882f610d7e`
-* 当前 HEAD：本地 checkpoint 稳定版本（最终 hash 以 `git rev-parse HEAD` 为准）
-* 本次功能：新增 X 作者主页与首页“为你推荐”采集、image/video/mixed 类型、HLS 分片与 FFmpeg MP4 封装，并保留 Pinterest 三种采集模式
-* 人工验收 PASS：X 作者图片、X 首页仅图片、X 首页仅视频、X 首页图片+视频、Persistent Profile、普通 Chrome 人工登录、Pinterest 既有采集链路
-* Pinterest 最终小规模回归 PASS：search 3 张、home 3 张、current_page 3 张；current_page 保持当前 URL；单项失败可继续，目标成功数量逻辑有效
-* X 最终小规模回归 PASS：`@NASA` 作者图片 3 张；首页仅图片 3 张；首页仅视频 2 张且为真实 H.264/AAC MP4；mixed 3 张（2 图 + 1 视频）
-* 视频实现：捕获 X `video.twimg.com` HLS，获取 m3u8，选择最高合理质量，下载音视频媒体并由 FFmpeg 封装 MP4，不使用 poster 作为视频
-* 浏览器会话：登录入口使用普通 Chrome，采集入口使用 Playwright `launch_persistent_context`；Pinterest / X 共用 `%LOCALAPPDATA%\\PinterestLocalDownloader\\browser-data`；Profile 持久化和占用保护自动测试通过
-* 图标：`assets/app_icon.png`、`assets/app_icon.ico` 已生成并接入源码、PyInstaller 资源路径和窗口图标
-* 自动回归：pytest 16 passed；compile/import、PySide6、Playwright、FFmpeg 检测、GUI 基础启动、`git diff --check` 均 PASS
-* 已知风险：X DOM/selector、动态 Feed、广告节点和 HLS 结构可能变化；平台可能出现登录、验证码和访问频率限制；HLS 加密播放列表暂不支持；FFmpeg 当前仍是外部运行依赖；视频停止通常在当前 FFmpeg 媒体完成后生效；Pinterest CDN 偶发 403
-* Git：本地 checkpoint commit，未 push，未重新打包 EXE；`.venv`、browser-data、Cookie、登录数据、测试媒体和临时 `.part` 不进入 Git
-* 下一步：将 FFmpeg 作为 EXE 发布依赖内置，避免目标机器必须手工安装，然后进行最终 EXE 打包验证
+* Phase：Bundled FFmpeg + Windows Release；基线 HEAD：`68a9451958cdff6e82603afc10832e4acb25b7a2`
+* FFmpeg：内置 `vendor/ffmpeg/ffmpeg.exe`，当前为 Gyan Essentials build 8.1.2，配置含 `--enable-gpl --enable-version3`，按 GPLv3-or-later 分发并保留 `vendor/ffmpeg/LICENSE.txt`
+* PyInstaller：稳定 onedir；发布目录 `dist/SocialMediaCollector/`；EXE：`SocialMediaCollector.exe`；构建脚本会清理并重建 `build/`、`dist/`，不触碰 Profile、源码、`.git` 或 `.venv`
+* FFmpeg resolver：打包 `_MEIPASS/vendor/ffmpeg/ffmpeg.exe` → 源码 `vendor/ffmpeg/ffmpeg.exe` → 可选 system PATH；发布版不要求系统 PATH，不含开发机绝对路径
+* 发布包资源：包含 GUI/Qt、Playwright Python driver、图标和 FFmpeg 许可证；不包含 browser Profile、Cookie、用户下载目录、tests、`.venv` 或 `.git`
+* EXE 基础回归 PASS：打包 GUI 正常启动/关闭；窗口标题和资源加载正常；普通 Chrome 登录入口使用固定 Profile，未使用 Playwright、automation、remote debugging、headless 或 `--no-sandbox`
+* Pinterest EXE 回归 PASS：search 3 张（发现 17、成功 3、跳过 1、失败 0）；home 3 张（发现 17、成功 3、跳过 1、失败 0）；current_page 3 张（发现 30、成功 3、失败 0），未自动导航
+* X EXE 回归 PASS：作者图片 3 张；首页仅图片 3 张；首页仅视频 2 个真实 MP4；视频含 H.264/AAC 音画流
+* Bundled FFmpeg Gate PASS：清空打包 EXE 子进程 PATH 且不提供 `D:\Tools\FFmpeg` 时，首页仅视频仍成功 2 个 MP4；发布运行时未读取开发机 FFmpeg
+* Release Gate：人工验收 PASS；Pinterest EXE、X 作者、X 首页图片、X 首页视频、X 首页 mixed、Bundled FFmpeg、Persistent Profile、Windows EXE 全部 PASS；mixed 已实际确认图片与视频共同采集
+* 浏览器会话：人工登录仍使用普通 Chrome，正式采集仍使用 Playwright `launch_persistent_context`；Pinterest / X 共用 `%LOCALAPPDATA%\\PinterestLocalDownloader\\browser-data`，不迁移、不打包 Profile
+* 图标：`assets/app_icon.png`、`assets/app_icon.ico` 已随 EXE 接入；PyInstaller 构建日志确认图标已嵌入，GUI 窗口图标资源加载正常
+* 自动回归：pytest 17 passed；compile/import、PySide6、Playwright、FFmpeg bundled resolver、GUI 基础启动、打包 GUI 启动、`git diff --check` 均 PASS
+* 已知风险：X DOM/selector、动态 Feed、广告节点和 HLS 结构可能变化；平台可能出现登录、验证码和访问频率限制；HLS 加密播放列表暂不支持；视频停止通常在当前 FFmpeg 媒体完成后生效；Pinterest CDN 偶发 403；当前 FFmpeg build 为 GPL，未来商业分发需另行评估 LGPL-compatible build
+* Git：本地 Release checkpoint 待提交，未 push；`.venv`、browser-data、Cookie、登录数据、测试媒体和临时 `.part` 不进入 Git
+* 下一步：Release 固化完成后停止新增功能；后续仅按需处理发布维护、签名或 LGPL-compatible FFmpeg 评估
 
 ## MVP 范围
 

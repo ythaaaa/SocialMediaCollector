@@ -1,0 +1,17 @@
+FFmpeg runtime license notice
+================================
+
+This directory contains the FFmpeg executable distributed with Social Media
+Asset Collector.
+
+Build: FFmpeg 8.1.2-essentials_build-www.gyan.dev
+Source/build provider: https://www.gyan.dev/ffmpeg/builds/
+Configuration: the executable reports --enable-gpl --enable-version3.
+
+The executable is distributed under the GNU General Public License, version 3
+or later (GPLv3-or-later). The FFmpeg project license notice is available from
+the executable with `ffmpeg -L`. The full license text is available at:
+https://www.gnu.org/licenses/gpl-3.0.txt
+
+This notice is not legal advice. Future distributions that need LGPL-compatible
+licensing must use a separately reviewed LGPL-compatible FFmpeg build.

@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import re
-import shutil
 import subprocess
 import tempfile
 from dataclasses import dataclass
@@ -10,6 +9,7 @@ from typing import Callable
 from urllib.parse import urljoin
 
 import httpx
+from src.utils.runtime import find_ffmpeg
 
 
 class HLSDownloadError(RuntimeError):
@@ -26,10 +26,6 @@ class HLSResult:
     width: int | None = None
     height: int | None = None
     bitrate: int | None = None
-
-
-def find_ffmpeg() -> str | None:
-    return shutil.which("ffmpeg")
 
 
 def parse_attributes(value: str) -> dict[str, str]:
