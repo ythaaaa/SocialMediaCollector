@@ -2,6 +2,8 @@
 
 Windows 本地社交媒体图片采集工具。它通过可见的 Pinterest / X 页面收集公开图片资源，并将经验证的图片、元数据和失败记录保存到用户选定的本地目录。项目不连接 MUSE、数据库、云存储或任何服务器。
 
+当前发布版本：`Social Media Collector v1.0.0`
+
 平台由 `platform` 字段区分：旧任务缺少该字段时默认按 `pinterest` 解释。
 
 ## 采集模式
@@ -87,26 +89,38 @@ GUI 的“打开浏览器 / 登录”入口会直接启动本机普通 `chrome.e
 .\scripts\build_exe.ps1
 ```
 
-输出文件为 `dist\Social Media Asset Collector\Social Media Asset Collector.exe`。本轮仅准备了打包脚本和图标资源，未重新打包 EXE。在未安装 Python 的 Windows 机器上，仍需随 EXE 一起分发 Playwright Chromium 浏览器（或首次在该机器安装浏览器）；这是 Playwright 的运行时依赖。
+输出文件为 `dist\SocialMediaCollector\SocialMediaCollector.exe`。当前 Phase 会重新构建 LGPL candidate onedir 包；在未安装 Python 的 Windows 机器上，仍需随 EXE 一起分发 Playwright Chromium 浏览器（或首次在该机器安装浏览器）；这是 Playwright 的运行时依赖。
 
 ## 当前进度记录
 
-* Phase：Bundled FFmpeg + Windows Release；基线 HEAD：`68a9451958cdff6e82603afc10832e4acb25b7a2`
-* FFmpeg：内置 `vendor/ffmpeg/ffmpeg.exe`，当前为 Gyan Essentials build 8.1.2，配置含 `--enable-gpl --enable-version3`，按 GPLv3-or-later 分发并保留 `vendor/ffmpeg/LICENSE.txt`
+* 产品版本：`Social Media Collector v1.0.0`；本 Phase 基线 HEAD：`6e098f8135dd5d22d55933bfeec7df3cde1f284f`
+* Phase：商业发布准备 / FFmpeg LGPL 替换；Release Gate：PASS
+* FFmpeg：内置 BtbN `n8.1.2-44-g7c533d0f86-20260823`，Windows x86_64 `LGPL shared` build；FFmpeg source revision `g7c533d0f86`；不含 `--enable-gpl` 或 `--enable-nonfree`
+* FFmpeg 来源：`autobuild-2026-08-23-13-03`；归档 SHA-256：`7B32983C242DD73D43C20836582572E9927986F8CB112AAFD62AA9978F4BE645`；完整许可证与来源记录见 `third_party/ffmpeg/`、`THIRD_PARTY_NOTICES.md`
 * PyInstaller：稳定 onedir；发布目录 `dist/SocialMediaCollector/`；EXE：`SocialMediaCollector.exe`；构建脚本会清理并重建 `build/`、`dist/`，不触碰 Profile、源码、`.git` 或 `.venv`
-* FFmpeg resolver：打包 `_MEIPASS/vendor/ffmpeg/ffmpeg.exe` → 源码 `vendor/ffmpeg/ffmpeg.exe` → 可选 system PATH；发布版不要求系统 PATH，不含开发机绝对路径
-* 发布包资源：包含 GUI/Qt、Playwright Python driver、图标和 FFmpeg 许可证；不包含 browser Profile、Cookie、用户下载目录、tests、`.venv` 或 `.git`
+* FFmpeg resolver：显式测试覆盖路径 → 打包/源码 `vendor/ffmpeg/ffmpeg.exe`（要求 7 个 shared DLL）→ 可选 system PATH；正式发布版不要求系统 PATH，不含开发机绝对路径
+* 发布包资源：包含 GUI/Qt、Playwright Python driver、图标、FFmpeg LGPL runtime 和许可证；不包含 browser Profile、Cookie、用户下载目录、tests、`.venv` 或 `.git`
 * EXE 基础回归 PASS：打包 GUI 正常启动/关闭；窗口标题和资源加载正常；普通 Chrome 登录入口使用固定 Profile，未使用 Playwright、automation、remote debugging、headless 或 `--no-sandbox`
 * Pinterest EXE 回归 PASS：search 3 张（发现 17、成功 3、跳过 1、失败 0）；home 3 张（发现 17、成功 3、跳过 1、失败 0）；current_page 3 张（发现 30、成功 3、失败 0），未自动导航
 * X EXE 回归 PASS：作者图片 3 张；首页仅图片 3 张；首页仅视频 2 个真实 MP4；视频含 H.264/AAC 音画流
-* Bundled FFmpeg Gate PASS：清空打包 EXE 子进程 PATH 且不提供 `D:\Tools\FFmpeg` 时，首页仅视频仍成功 2 个 MP4；发布运行时未读取开发机 FFmpeg
-* Release Gate：人工验收 PASS；Pinterest EXE、X 作者、X 首页图片、X 首页视频、X 首页 mixed、Bundled FFmpeg、Persistent Profile、Windows EXE 全部 PASS；mixed 已实际确认图片与视频共同采集
+* Bundled FFmpeg Gate PASS（上一 GPL Release）：清空打包 EXE 子进程 PATH 且不提供 `D:\Tools\FFmpeg` 时，首页仅视频成功 2 个 MP4；本 Phase 已用 LGPL candidate 重复验证
+* LGPL 候选隔离回归 PASS：清空子进程 PATH 且不提供 `D:\Tools\FFmpeg` 时，X 首页仅视频目标 3 成功 3 个真实 MP4；mixed 目标 5 成功 5 个（4 图片 + 1 视频）；候选 FFmpeg 解码/封装正常
+* LGPL 候选 EXE 回归 PASS：GUI 正常启动；无系统 FFmpeg PATH 时，X 首页仅视频目标 2 成功 2 个真实 MP4 且包内 FFmpeg 解码返回 0；mixed 目标 3 成功 3 个；Pinterest 首页推荐目标 3 成功 3 个
+* Release Gate：人工验收 PASS；X 首页仅视频、音画、mixed、Persistent Profile、GUI/图标/任务栏和 Windows EXE 均已确认正常
 * 浏览器会话：人工登录仍使用普通 Chrome，正式采集仍使用 Playwright `launch_persistent_context`；Pinterest / X 共用 `%LOCALAPPDATA%\\PinterestLocalDownloader\\browser-data`，不迁移、不打包 Profile
 * 图标：`assets/app_icon.png`、`assets/app_icon.ico` 已随 EXE 接入；PyInstaller 构建日志确认图标已嵌入，GUI 窗口图标资源加载正常
-* 自动回归：pytest 17 passed；compile/import、PySide6、Playwright、FFmpeg bundled resolver、GUI 基础启动、打包 GUI 启动、`git diff --check` 均 PASS
-* 已知风险：X DOM/selector、动态 Feed、广告节点和 HLS 结构可能变化；平台可能出现登录、验证码和访问频率限制；HLS 加密播放列表暂不支持；视频停止通常在当前 FFmpeg 媒体完成后生效；Pinterest CDN 偶发 403；当前 FFmpeg build 为 GPL，未来商业分发需另行评估 LGPL-compatible build
-* Git：本地 Release checkpoint 待提交，未 push；`.venv`、browser-data、Cookie、登录数据、测试媒体和临时 `.part` 不进入 Git
-* 下一步：Release 固化完成后停止新增功能；后续仅按需处理发布维护、签名或 LGPL-compatible FFmpeg 评估
+* 自动回归：pytest 19 passed；compile/import、PySide6、Playwright、FFmpeg resolver、LGPL 共享 DLL 完整性、GUI 基础启动、隔离 EXE 视频/mixed、`git diff --check` 均 PASS
+* 已知风险：X DOM/selector、动态 Feed、广告节点和 HLS 结构可能变化；平台可能出现登录、验证码和访问频率限制；HLS 加密播放列表暂不支持；视频停止通常在当前 FFmpeg 媒体完成后生效；Pinterest CDN 偶发 403；LGPL 选择不包含 GPL-only 的 libx264/libx265，未来若引入其他 FFmpeg 编码能力需重新审查许可证与运行时依赖
+* Git：Release 固化为本地 commit 和 annotated tag `v1.0.0`；不 push、不创建 GitHub Release；`.venv`、browser-data、Cookie、登录数据、测试媒体和临时 `.part` 不进入 Git
+* 下一步：仅处理必要的发布维护、签名或远程发布策略；不新增采集功能、不迁移 Profile、不内置 FFmpeg 源码
+
+## v1.0.0 发布内容
+
+* Pinterest：关键词搜索、首页推荐、当前页面、图片采集。
+* X：作者主页、首页推荐、仅图片、仅视频、图片 + 视频 mixed。
+* Runtime：Windows PyInstaller onedir EXE、持久化 Chrome Profile、普通 Chrome 人工登录、Playwright 正式采集、bundled FFmpeg LGPL shared。
+* 发布使用：不要求 Python，不要求用户手动安装 FFmpeg；需要本机 Google Chrome，登录状态保存在 `%LOCALAPPDATA%\\PinterestLocalDownloader\\browser-data`。
+* 已知限制：X/Pinterest DOM 未来可能变化；登录、验证码和平台频率限制；Pinterest CDN 偶发 403；加密 HLS 暂不支持；视频停止可能等待当前 FFmpeg 任务完成；当前 Profile 路径保留历史 `PinterestLocalDownloader` 名称。
 
 ## MVP 范围
 

@@ -1,0 +1,20 @@
+FFmpeg source and binary provenance
+
+Project: FFmpeg
+Homepage: https://ffmpeg.org/
+Binary provider: BtbN/FFmpeg-Builds
+Provider repository: https://github.com/btbn/ffmpeg-builds
+Build archive: ffmpeg-n8.1.2-44-g7c533d0f86-win64-lgpl-shared-8.1.zip
+Release tag: autobuild-2026-08-23-13-03
+Download URL: https://github.com/BtbN/FFmpeg-Builds/releases/download/autobuild-2026-08-23-13-03/ffmpeg-n8.1.2-44-g7c533d0f86-win64-lgpl-shared-8.1.zip
+Archive SHA-256: 7B32983C242DD73D43C20836582572E9927986F8CB112AAFD62AA9978F4BE645
+Target: Windows x86_64
+Variant: LGPL shared
+FFmpeg build version: n8.1.2-44-g7c533d0f86-20260823
+FFmpeg source revision: g7c533d0f86
+License: GNU Lesser General Public License, version 3 or later (LGPL-3.0-or-later)
+
+The project uses the unmodified upstream/provider binary build. No FFmpeg
+source code is included in this repository and no FFmpeg source modifications
+were made for this project. The shipped runtime is ffmpeg.exe plus the shared
+libav*/sw* DLLs listed in BUILD_INFO.txt.

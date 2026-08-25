@@ -1,0 +1,15 @@
+FFmpeg build details
+
+Build: n8.1.2-44-g7c533d0f86-20260823
+Platform: win64
+Linkage: shared (DLL runtime)
+License variant: LGPL
+
+Relevant configure flags from ffmpeg -version:
+--enable-version3 --enable-shared --disable-static
+--disable-libx264 --disable-libx265 --disable-libxavs2 --disable-libxvid
+
+The full configure line is preserved in the candidate build's -version
+output and the release provenance is recorded in SOURCE_INFO.txt. This file
+records the flags relevant to the distribution decision; it is not a
+replacement for the upstream license text.

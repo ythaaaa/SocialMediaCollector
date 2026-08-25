@@ -1,0 +1,11 @@
+FFmpeg runtime notice
+
+This application invokes FFmpeg as a separate local subprocess to remux
+captured HLS media into MP4 files. The distributed runtime is the BtbN
+win64 LGPL shared build identified in SOURCE_INFO.txt.
+
+The complete applicable license text is included in LICENSE.txt. The
+application does not include FFmpeg source code or modify the FFmpeg source.
+This notice documents engineering distribution information and is not legal
+advice. Commercial release should receive a final license review before
+public distribution.

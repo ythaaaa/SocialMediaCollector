@@ -1,8 +1,20 @@
 from __future__ import annotations
 
+import os
 import shutil
 import sys
 from pathlib import Path
+
+
+REQUIRED_SHARED_DLLS = (
+    "avcodec-62.dll",
+    "avdevice-62.dll",
+    "avfilter-11.dll",
+    "avformat-62.dll",
+    "avutil-60.dll",
+    "swresample-6.dll",
+    "swscale-9.dll",
+)
 
 
 def runtime_root() -> Path:
@@ -20,15 +32,28 @@ def _bundled_ffmpeg_candidates() -> tuple[Path, ...]:
     )
 
 
-def resolve_ffmpeg() -> tuple[str | None, str | None]:
-    """Resolve FFmpeg from bundled runtime resources, then PATH fallback.
+def bundled_ffmpeg_runtime_complete(executable: Path) -> bool:
+    """Check the shared DLL set shipped beside the formal LGPL executable."""
+    return executable.is_file() and all(
+        (executable.parent / dll_name).is_file() for dll_name in REQUIRED_SHARED_DLLS
+    )
 
-    The resolver intentionally does not contain any machine-specific development
-    paths. In a packaged build the bundled executable wins over PATH.
+
+def resolve_ffmpeg() -> tuple[str | None, str | None]:
+    """Resolve FFmpeg from an explicit test candidate, bundled resources, or PATH.
+
+    ``SOCIAL_MEDIA_COLLECTOR_FFMPEG_PATH`` is intentionally an explicit test
+    hook. Normal packaged and source runs do not set it, so the bundled
+    executable wins over PATH without any machine-specific development path.
     """
-    for candidate in _bundled_ffmpeg_candidates():
+    override = os.environ.get("SOCIAL_MEDIA_COLLECTOR_FFMPEG_PATH")
+    if override:
+        candidate = Path(override)
         if candidate.is_file():
-            return str(candidate), "bundled"
+            return str(candidate), "bundled-lgpl-candidate"
+    for candidate in _bundled_ffmpeg_candidates():
+        if bundled_ffmpeg_runtime_complete(candidate):
+            return str(candidate), "bundled-lgpl"
     system_path = shutil.which("ffmpeg")
     if system_path:
         return system_path, "system-path"

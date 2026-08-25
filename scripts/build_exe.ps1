@@ -12,6 +12,7 @@ foreach ($directory in @('build', 'dist')) {
 $python = Join-Path $projectRoot '.venv\Scripts\python.exe'
 $uiResources = Join-Path $projectRoot 'src\ui\resources'
 $assets = Join-Path $projectRoot 'assets'
+$vendorRuntime = Join-Path $projectRoot 'vendor\ffmpeg'
 $ffmpeg = Join-Path $projectRoot 'vendor\ffmpeg\ffmpeg.exe'
 $license = Join-Path $projectRoot 'vendor\ffmpeg\LICENSE.txt'
 foreach ($required in @($python, $ffmpeg, $license)) {
@@ -19,22 +20,32 @@ foreach ($required in @($python, $ffmpeg, $license)) {
         throw "缺少发布资源：$required"
     }
 }
+$runtimeDlls = @(Get-ChildItem -LiteralPath $vendorRuntime -Filter '*.dll' -File)
+if ($runtimeDlls.Count -eq 0) {
+    throw "缺少 FFmpeg shared runtime DLL：$vendorRuntime"
+}
 
-& $python -m PyInstaller `
-    --noconfirm `
-    --clean `
-    --windowed `
-    --name 'SocialMediaCollector' `
-    --paths . `
-    --workpath build `
-    --distpath dist `
-    --specpath build `
-    --add-data "$uiResources;src\ui\resources" `
-    --add-data "$assets;assets" `
-    --add-data "$license;vendor\ffmpeg" `
-    --add-binary "$ffmpeg;vendor\ffmpeg" `
-    --icon (Join-Path $assets 'app_icon.ico') `
-    app.py
+$pyInstallerArgs = @(
+    '--noconfirm',
+    '--clean',
+    '--windowed',
+    '--name', 'SocialMediaCollector',
+    '--paths', '.',
+    '--workpath', 'build',
+    '--distpath', 'dist',
+    '--specpath', 'build',
+    '--add-data', "$uiResources;src\ui\resources",
+    '--add-data', "$assets;assets",
+    '--add-data', "$license;vendor\ffmpeg",
+    '--add-binary', "$ffmpeg;vendor\ffmpeg",
+    '--icon', (Join-Path $assets 'app_icon.ico'),
+    'app.py'
+)
+foreach ($dll in $runtimeDlls) {
+    $pyInstallerArgs += @('--add-binary', "$($dll.FullName);vendor\ffmpeg")
+}
+
+& $python -m PyInstaller @pyInstallerArgs
 
 $release = Join-Path $projectRoot 'dist\SocialMediaCollector'
 $exe = Join-Path $release 'SocialMediaCollector.exe'
