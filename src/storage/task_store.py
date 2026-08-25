@@ -10,7 +10,11 @@ from src.models import DownloadRecord, TaskConfig
 
 
 class TaskStore:
-    fields = ["filename", "keyword", "pin_url", "image_url", "width", "height", "file_size", "image_format", "downloaded_at", "content_hash", "status", "reason"]
+    fields = [
+        "filename", "keyword", "pin_url", "image_url", "width", "height", "file_size",
+        "image_format", "downloaded_at", "content_hash", "status", "reason",
+        "collection_mode", "source_page_url",
+    ]
 
     def __init__(self, task_dir: Path, config: TaskConfig) -> None:
         self.task_dir = task_dir
@@ -23,6 +27,8 @@ class TaskStore:
     def _write_task(self, config: TaskConfig) -> None:
         data = asdict(config)
         data["output_root"] = str(config.output_root)
+        data["collection_mode"] = config.canonical_collection_mode()
+        data["mode"] = data["collection_mode"]
         data["created_at"] = datetime.now().isoformat(timespec="seconds")
         (self.task_dir / "task.json").write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
 

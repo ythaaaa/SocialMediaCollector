@@ -8,7 +8,7 @@ from pathlib import Path
 from PySide6.QtCore import Qt, QThread, Signal, QTimer
 from PySide6.QtGui import QCloseEvent, QIcon, QTextCursor
 from PySide6.QtWidgets import (
-    QApplication, QDoubleSpinBox, QFileDialog, QFormLayout, QFrame, QGridLayout,
+    QApplication, QComboBox, QDoubleSpinBox, QFileDialog, QFormLayout, QFrame, QGridLayout,
     QHBoxLayout, QLabel, QLineEdit, QMainWindow, QMessageBox, QPushButton,
     QProgressBar, QScrollArea, QSpinBox, QTextEdit, QToolButton, QVBoxLayout, QWidget,
 )
@@ -71,9 +71,17 @@ class MainWindow(QMainWindow):
         self._set_running(False)
 
     def _create_controls(self) -> None:
+        self.mode = QComboBox()
+        self.mode.addItem("关键词搜索", "search")
+        self.mode.addItem("首页推荐", "home")
+        self.mode.addItem("当前页面", "current_page")
+        self.mode.setMinimumHeight(36)
         self.keyword = QLineEdit()
         self.keyword.setPlaceholderText("输入 Pinterest 搜索关键词，例如：东方古风美女")
         self.keyword.setMinimumHeight(42)
+        self.mode_hint = QLabel()
+        self.mode_hint.setObjectName("cardSubtitle")
+        self.mode_hint.setWordWrap(True)
 
         self.count = self._spin_box(1, 10000, 100)
         self.min_width = self._spin_box(1, 10000, 800)
@@ -159,8 +167,11 @@ class MainWindow(QMainWindow):
 
     def _build_settings_card(self) -> QFrame:
         card, layout = self._card("任务设置", "设置关键词、图片数量和本地保存位置")
+        layout.addWidget(self._field_label("采集模式"))
+        layout.addWidget(self.mode)
         layout.addWidget(self._field_label("搜索关键词"))
         layout.addWidget(self.keyword)
+        layout.addWidget(self.mode_hint)
         numbers = QGridLayout()
         numbers.setHorizontalSpacing(12)
         for column, (label, control) in enumerate((
@@ -274,6 +285,18 @@ class MainWindow(QMainWindow):
         self.stop.clicked.connect(self.stop_task)
         self.open_dir.clicked.connect(self.open_output)
         self.clear_log.clicked.connect(self.log.clear)
+        self.mode.currentIndexChanged.connect(self._mode_changed)
+
+    def _mode_changed(self, _index: int) -> None:
+        mode = self.mode.currentData()
+        search = mode == "search"
+        self.keyword.setEnabled(search)
+        self.keyword.setPlaceholderText("输入 Pinterest 搜索关键词" if search else "此模式不需要关键词")
+        self.mode_hint.setText({
+            "search": "根据关键词打开 Pinterest 搜索结果并从顶部开始采集。",
+            "home": "从 Pinterest 首页推荐流开始采集，不需要关键词。",
+            "current_page": "请先在 Pinterest 浏览器中打开目标页面，再点击开始下载；程序不会自动切换页面。",
+        }.get(mode, ""))
 
     def choose_dir(self) -> None:
         path = QFileDialog.getExistingDirectory(self, "选择图片保存目录", self.output.text())
@@ -282,7 +305,15 @@ class MainWindow(QMainWindow):
 
     def start_task(self) -> None:
         try:
-            config = TaskConfig(self.keyword.text(), self.count.value(), Path(self.output.text()), self.min_width.value(), self.min_height.value(), self.interval.value())
+            config = TaskConfig(
+                keyword=self.keyword.text(),
+                target_count=self.count.value(),
+                output_root=Path(self.output.text()),
+                min_width=self.min_width.value(),
+                min_height=self.min_height.value(),
+                interval_seconds=self.interval.value(),
+                collection_mode=str(self.mode.currentData()),
+            )
             config.validate()
             config.output_root.mkdir(parents=True, exist_ok=True)
         except (ValueError, OSError) as exc:
@@ -356,6 +387,11 @@ class MainWindow(QMainWindow):
 
     def _set_running(self, running: bool) -> None:
         self.start.setEnabled(not running)
+        self.mode.setEnabled(not running)
+        if running:
+            self.keyword.setEnabled(False)
+        else:
+            self._mode_changed(self.mode.currentIndex())
         self.pause.setEnabled(running)
         self.resume.setEnabled(running)
         self.stop.setEnabled(running)

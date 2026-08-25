@@ -11,7 +11,7 @@ from typing import Callable
 import httpx
 from PIL import Image, UnidentifiedImageError
 
-from src.browser import PinterestCollector
+from src.browser import ImageCandidate, PinterestCollector
 from src.models import DownloadRecord, TaskConfig, TaskStats
 from src.storage import TaskStore
 from src.utils.paths import create_task_directory
@@ -37,26 +37,34 @@ class DownloadEngine:
         self.on_stats(self.stats)
 
     def run(self) -> Path:
-        self.task_dir = create_task_directory(self.config.output_root, self.config.keyword)
+        mode = self.config.canonical_collection_mode()
+        task_name = {
+            "search": self.config.keyword,
+            "home": "首页推荐流",
+            "current_page": "当前页面",
+        }[mode]
+        self.task_dir = create_task_directory(self.config.output_root, task_name)
         store = TaskStore(self.task_dir, self.config)
         collector = PinterestCollector(self.profile_dir, self.on_log)
         try:
             self._emit("正在打开浏览器并收集图片")
             collector.open()
-            candidates = collector.collect(self.config.keyword, self.config.target_count, self.config.max_scrolls, self.stop_event.is_set, self._wait_if_paused, self._on_found)
-            self.on_log(f"收集完成，发现 {len(candidates)} 个候选资源。")
-            self._emit("正在下载图片")
             known = store.known_hashes()
             with httpx.Client(headers={"User-Agent": "Mozilla/5.0"}, follow_redirects=True, timeout=30) as client:
-                for candidate in candidates:
-                    if self.stop_event.is_set() or self.stats.downloaded >= self.config.target_count: break
-                    self._wait_if_paused()
-                    if self.stop_event.is_set(): break
-                    self._download_one(client, candidate.image_url, candidate.pin_url, store, known)
-                    self._emit()
-                    if self.config.interval_seconds: time.sleep(self.config.interval_seconds)
+                on_candidate = lambda candidate: self._process_candidate(client, candidate, store, known)
+                should_finish = lambda: self.stats.downloaded >= self.config.target_count
+                if mode == "search":
+                    candidates = collector.collect(self.config.keyword, self.config.target_count, self.config.max_scrolls, self.stop_event.is_set, self._wait_if_paused, self._on_found, on_candidate, should_finish)
+                elif mode == "home":
+                    candidates = collector.collect_home(self.config.target_count, self.config.max_scrolls, self.stop_event.is_set, self._wait_if_paused, self._on_found, on_candidate, should_finish)
+                else:
+                    candidates = collector.collect_current_page(self.config.target_count, self.config.max_scrolls, self.stop_event.is_set, self._wait_if_paused, self._on_found, on_candidate, should_finish)
+            self.on_log(f"收集完成，发现 {len(candidates)} 个候选资源。")
+            if not self.stop_event.is_set() and self.stats.downloaded < self.config.target_count:
+                self.on_log(f"目标 {self.config.target_count} 张，实际成功 {self.stats.downloaded} 张；页面暂无更多可采集内容。")
             store.complete(self.stats, self.stop_event.is_set())
-            self._emit("已停止" if self.stop_event.is_set() else "任务完成")
+            status = "已停止" if self.stop_event.is_set() else ("任务完成" if self.stats.downloaded >= self.config.target_count else "采集结束（页面暂无更多内容）")
+            self._emit(status)
         except Exception as exc:
             store.complete(self.stats, self.stop_event.is_set(), str(exc))
             raise
@@ -67,17 +75,48 @@ class DownloadEngine:
     def _on_found(self, count: int) -> None:
         self.stats.discovered = count; self._emit()
 
-    def _download_one(self, client: httpx.Client, url: str, pin_url: str, store: TaskStore, known: set[str]) -> None:
-        record = DownloadRecord("", self.config.keyword, pin_url, url)
+    def _process_candidate(self, client: httpx.Client, candidate: ImageCandidate, store: TaskStore, known: set[str]) -> None:
+        if self.stop_event.is_set() or self.stats.downloaded >= self.config.target_count:
+            return
+        self._wait_if_paused()
+        if self.stop_event.is_set():
+            return
+        self._emit("正在下载图片")
+        self._download_one(client, candidate, store, known)
+        self._emit()
+        self._sleep_interval()
+
+    def _sleep_interval(self) -> None:
+        self._sleep_controlled(self.config.interval_seconds)
+
+    def _sleep_controlled(self, seconds: float) -> None:
+        remaining = seconds
+        while remaining > 0 and not self.stop_event.is_set():
+            self._wait_if_paused()
+            if self.stop_event.is_set():
+                return
+            delay = min(0.2, remaining)
+            time.sleep(delay)
+            remaining -= delay
+
+    def _download_one(self, client: httpx.Client, candidate: ImageCandidate, store: TaskStore, known: set[str]) -> None:
+        record = DownloadRecord(
+            "",
+            self.config.keyword,
+            candidate.pin_url,
+            candidate.image_url,
+            collection_mode=self.config.canonical_collection_mode(),
+            source_page_url=candidate.source_page_url,
+        )
         try:
             content = b""
             for attempt in range(self.config.retry_count):
                 try:
-                    response = client.get(url, headers={"Referer": "https://www.pinterest.com/"})
+                    response = client.get(candidate.image_url, headers={"Referer": "https://www.pinterest.com/"})
                     response.raise_for_status(); content = response.content; break
                 except httpx.HTTPError:
                     if attempt == self.config.retry_count - 1: raise
-                    time.sleep(1 + attempt)
+                    self._sleep_controlled(1 + attempt)
             digest = hashlib.sha256(content).hexdigest()
             if digest in known:
                 self.stats.skipped += 1; record.status, record.reason, record.content_hash = "skipped", "内容重复", digest; store.append(record); return
@@ -96,4 +135,4 @@ class DownloadEngine:
             store.append(record); known.add(digest); self.stats.downloaded += 1
             self.on_log(f"已保存 {filename}（{width}×{height}）")
         except (httpx.HTTPError, UnidentifiedImageError, OSError, ValueError) as exc:
-            self.stats.failed += 1; record.status, record.reason = "failed", str(exc); store.append(record); self.on_log(f"下载失败：{url} - {exc}")
+            self.stats.failed += 1; record.status, record.reason = "failed", str(exc); store.append(record); self.on_log(f"下载失败：{candidate.image_url} - {exc}")
