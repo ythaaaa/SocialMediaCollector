@@ -4,6 +4,8 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Mapping
 
+from src.utils.x import normalize_x_author
+
 
 @dataclass(frozen=True)
 class TaskConfig:
@@ -20,6 +22,17 @@ class TaskConfig:
     # the canonical ``collection_mode`` values for new code.
     mode: str = "keyword_search"
     collection_mode: str = ""
+    platform: str = "pinterest"
+    source_identifier: str = ""
+    source_page_url: str = ""
+    author_username: str = ""
+    only_author_content: bool = True
+    media_type: str = "image"
+
+    def canonical_platform(self) -> str:
+        raw = (self.platform or "pinterest").strip().lower()
+        aliases = {"pinterest": "pinterest", "x": "x", "twitter": "x"}
+        return aliases.get(raw, raw)
 
     def canonical_collection_mode(self) -> str:
         raw = (self.collection_mode or self.mode or "search").strip()
@@ -29,6 +42,21 @@ class TaskConfig:
             "search": "search",
             "home": "home",
             "current_page": "current_page",
+        }
+        return aliases.get(raw, raw)
+
+    def canonical_author(self) -> tuple[str, str]:
+        return normalize_x_author(self.source_identifier or self.author_username or self.keyword)
+
+    def canonical_media_type(self) -> str:
+        raw = (self.media_type or "image").strip().lower()
+        aliases = {
+            "images": "image",
+            "image_only": "image",
+            "videos": "video",
+            "video_only": "video",
+            "image_video": "mixed",
+            "images_videos": "mixed",
         }
         return aliases.get(raw, raw)
 
@@ -47,14 +75,29 @@ class TaskConfig:
             retry_count=int(data.get("retry_count", 3)),
             mode=str(data.get("mode") or "keyword_search"),
             collection_mode=collection_mode,
+            platform=str(data.get("platform") or "pinterest"),
+            source_identifier=str(data.get("source_identifier") or ""),
+            source_page_url=str(data.get("source_page_url") or ""),
+            author_username=str(data.get("author_username") or ""),
+            only_author_content=bool(data.get("only_author_content", True)),
+            media_type=str(data.get("media_type") or "image"),
         )
 
     def validate(self) -> None:
+        platform = self.canonical_platform()
         collection_mode = self.canonical_collection_mode()
-        if collection_mode not in {"search", "home", "current_page"}:
+        supported_modes = {"search", "home", "current_page"} if platform == "pinterest" else {"author", "home"} if platform == "x" else set()
+        if not supported_modes or collection_mode not in supported_modes:
             raise ValueError("unsupported collection mode")
-        if collection_mode == "search" and not self.keyword.strip():
+        if platform == "pinterest" and collection_mode == "search" and not self.keyword.strip():
             raise ValueError("搜索关键词不能为空")
+        if platform == "x":
+            if self.canonical_media_type() not in {"image", "video", "mixed"}:
+                raise ValueError("X 下载内容类型无效")
+            if collection_mode == "author":
+                self.canonical_author()
+        elif self.canonical_media_type() != "image":
+            raise ValueError("Pinterest 仅支持图片")
         if self.target_count < 1:
             raise ValueError("下载数量必须大于 0")
         if self.min_width < 1 or self.min_height < 1:
@@ -79,6 +122,16 @@ class DownloadRecord:
     reason: str = ""
     collection_mode: str = "search"
     source_page_url: str = ""
+    platform: str = "pinterest"
+    author_username: str = ""
+    post_url: str = ""
+    only_author_content: bool = True
+    media_type: str = "image"
+    media_url: str = ""
+    duration: float | None = None
+    video_width: int | None = None
+    video_height: int | None = None
+    bitrate: int | None = None
 
     def row(self) -> dict[str, Any]:
         return asdict(self)

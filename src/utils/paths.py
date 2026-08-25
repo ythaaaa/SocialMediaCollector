@@ -25,3 +25,10 @@ def application_data_directory() -> Path:
     directory = base / "PinterestLocalDownloader"
     directory.mkdir(parents=True, exist_ok=True)
     return directory
+
+
+def browser_profile_directory() -> Path:
+    """Return the stable app-owned profile shared by Pinterest and X."""
+    directory = application_data_directory() / "browser-data"
+    directory.mkdir(parents=True, exist_ok=True)
+    return directory

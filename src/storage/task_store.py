@@ -13,7 +13,9 @@ class TaskStore:
     fields = [
         "filename", "keyword", "pin_url", "image_url", "width", "height", "file_size",
         "image_format", "downloaded_at", "content_hash", "status", "reason",
-        "collection_mode", "source_page_url",
+        "collection_mode", "source_page_url", "platform", "author_username", "post_url",
+        "only_author_content", "media_type", "media_url", "duration", "video_width",
+        "video_height", "bitrate",
     ]
 
     def __init__(self, task_dir: Path, config: TaskConfig) -> None:
@@ -27,8 +29,16 @@ class TaskStore:
     def _write_task(self, config: TaskConfig) -> None:
         data = asdict(config)
         data["output_root"] = str(config.output_root)
+        data["platform"] = config.canonical_platform()
         data["collection_mode"] = config.canonical_collection_mode()
+        data["media_type"] = config.canonical_media_type()
         data["mode"] = data["collection_mode"]
+        if config.canonical_platform() == "x" and config.canonical_collection_mode() == "author":
+            username, profile_url = config.canonical_author()
+            data["author_username"] = username
+            data["source_page_url"] = profile_url
+        elif config.canonical_platform() == "x":
+            data["source_page_url"] = "https://x.com/home"
         data["created_at"] = datetime.now().isoformat(timespec="seconds")
         (self.task_dir / "task.json").write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
 

@@ -11,8 +11,9 @@ from typing import Callable
 import httpx
 from PIL import Image, UnidentifiedImageError
 
-from src.browser import ImageCandidate, PinterestCollector
+from src.browser import ImageCandidate, PinterestCollector, XCollector
 from src.models import DownloadRecord, TaskConfig, TaskStats
+from src.downloader.hls import HLSDownloadCancelled, HLSDownloadError, HLSDownloader
 from src.storage import TaskStore
 from src.utils.paths import create_task_directory
 
@@ -37,15 +38,22 @@ class DownloadEngine:
         self.on_stats(self.stats)
 
     def run(self) -> Path:
+        platform = self.config.canonical_platform()
         mode = self.config.canonical_collection_mode()
-        task_name = {
-            "search": self.config.keyword,
-            "home": "首页推荐流",
-            "current_page": "当前页面",
-        }[mode]
+        if platform == "x" and mode == "author":
+            username, _ = self.config.canonical_author()
+            task_name = f"x_{username}"
+        elif platform == "x":
+            task_name = "x_首页推荐流"
+        else:
+            task_name = {
+                "search": self.config.keyword,
+                "home": "首页推荐流",
+                "current_page": "当前页面",
+            }[mode]
         self.task_dir = create_task_directory(self.config.output_root, task_name)
         store = TaskStore(self.task_dir, self.config)
-        collector = PinterestCollector(self.profile_dir, self.on_log)
+        collector = XCollector(self.profile_dir, self.on_log) if platform == "x" else PinterestCollector(self.profile_dir, self.on_log)
         try:
             self._emit("正在打开浏览器并收集图片")
             collector.open()
@@ -53,7 +61,11 @@ class DownloadEngine:
             with httpx.Client(headers={"User-Agent": "Mozilla/5.0"}, follow_redirects=True, timeout=30) as client:
                 on_candidate = lambda candidate: self._process_candidate(client, candidate, store, known)
                 should_finish = lambda: self.stats.downloaded >= self.config.target_count
-                if mode == "search":
+                if platform == "x" and mode == "author":
+                    candidates = collector.collect_author(self.config.source_identifier or self.config.author_username or self.config.keyword, self.config.target_count, self.config.max_scrolls, self.config.only_author_content, self.stop_event.is_set, self._wait_if_paused, self._on_found, on_candidate, should_finish, self.config.canonical_media_type())
+                elif platform == "x":
+                    candidates = collector.collect_home(self.config.target_count, self.config.max_scrolls, self.stop_event.is_set, self._wait_if_paused, self._on_found, on_candidate, should_finish, self.config.canonical_media_type())
+                elif mode == "search":
                     candidates = collector.collect(self.config.keyword, self.config.target_count, self.config.max_scrolls, self.stop_event.is_set, self._wait_if_paused, self._on_found, on_candidate, should_finish)
                 elif mode == "home":
                     candidates = collector.collect_home(self.config.target_count, self.config.max_scrolls, self.stop_event.is_set, self._wait_if_paused, self._on_found, on_candidate, should_finish)
@@ -81,7 +93,7 @@ class DownloadEngine:
         self._wait_if_paused()
         if self.stop_event.is_set():
             return
-        self._emit("正在下载图片")
+        self._emit("正在下载视频" if candidate.media_type == "video" else "正在下载图片")
         self._download_one(client, candidate, store, known)
         self._emit()
         self._sleep_interval()
@@ -100,19 +112,35 @@ class DownloadEngine:
             remaining -= delay
 
     def _download_one(self, client: httpx.Client, candidate: ImageCandidate, store: TaskStore, known: set[str]) -> None:
+        platform = self.config.canonical_platform()
+        record_keyword = self.config.keyword or self.config.source_identifier
+        media_url = candidate.media_url or candidate.image_url
         record = DownloadRecord(
             "",
-            self.config.keyword,
+            record_keyword,
             candidate.pin_url,
-            candidate.image_url,
+            media_url,
             collection_mode=self.config.canonical_collection_mode(),
             source_page_url=candidate.source_page_url,
+            platform=platform,
+            author_username=candidate.author_username or self.config.author_username,
+            post_url=candidate.post_url or candidate.pin_url,
+            only_author_content=self.config.only_author_content,
+            media_type=candidate.media_type,
+            media_url=media_url,
+            duration=candidate.duration,
+            video_width=candidate.video_width,
+            video_height=candidate.video_height,
         )
         try:
+            if candidate.media_type == "video":
+                self._download_video(client, candidate, record, store, known)
+                return
             content = b""
             for attempt in range(self.config.retry_count):
                 try:
-                    response = client.get(candidate.image_url, headers={"Referer": "https://www.pinterest.com/"})
+                    referer = "https://x.com/" if platform == "x" else "https://www.pinterest.com/"
+                    response = client.get(media_url, headers={"Referer": referer})
                     response.raise_for_status(); content = response.content; break
                 except httpx.HTTPError:
                     if attempt == self.config.retry_count - 1: raise
@@ -134,5 +162,55 @@ class DownloadEngine:
             record.image_format, record.downloaded_at, record.content_hash, record.status = fmt, datetime.now().isoformat(timespec="seconds"), digest, "downloaded"
             store.append(record); known.add(digest); self.stats.downloaded += 1
             self.on_log(f"已保存 {filename}（{width}×{height}）")
-        except (httpx.HTTPError, UnidentifiedImageError, OSError, ValueError) as exc:
-            self.stats.failed += 1; record.status, record.reason = "failed", str(exc); store.append(record); self.on_log(f"下载失败：{candidate.image_url} - {exc}")
+        except HLSDownloadCancelled:
+            return
+        except (httpx.HTTPError, HLSDownloadError, UnidentifiedImageError, OSError, ValueError) as exc:
+            self.stats.failed += 1; record.status, record.reason = "failed", str(exc); store.append(record); self.on_log(f"下载失败：{media_url} - {exc}")
+
+    def _download_video(self, client: httpx.Client, candidate: ImageCandidate, record: DownloadRecord, store: TaskStore, known: set[str]) -> None:
+        assert self.task_dir
+        videos_dir = self.task_dir / "videos"
+        videos_dir.mkdir(exist_ok=True)
+        basename = f"{self.stats.downloaded + 1:04d}.mp4"
+        final_path = videos_dir / basename
+        part_path = videos_dir / f".{basename}.part.mp4"
+        try:
+            result = HLSDownloader(
+                client,
+                {"Referer": "https://x.com/", "User-Agent": "Mozilla/5.0"},
+                self.config.retry_count,
+                self.stop_event.is_set,
+                self._wait_if_paused,
+            ).download(candidate.media_url or candidate.image_url, part_path)
+            digest = self._file_hash(part_path)
+            if digest in known:
+                self.stats.skipped += 1
+                record.status, record.reason, record.content_hash = "skipped", "内容重复", digest
+                store.append(record)
+                return
+            part_path.replace(final_path)
+            record.filename = f"videos/{basename}"
+            record.file_size = final_path.stat().st_size
+            record.image_format = "MP4"
+            record.downloaded_at = datetime.now().isoformat(timespec="seconds")
+            record.content_hash = digest
+            record.status = "downloaded"
+            record.duration = result.duration or record.duration
+            record.video_width = result.width or record.video_width
+            record.video_height = result.height or record.video_height
+            record.bitrate = result.bitrate
+            store.append(record)
+            known.add(digest)
+            self.stats.downloaded += 1
+            self.on_log(f"已保存 {record.filename}（视频）")
+        finally:
+            if part_path.exists():
+                part_path.unlink()
+
+    @staticmethod
+    def _file_hash(path: Path) -> str:
+        digest = hashlib.sha256()
+        with path.open("rb") as handle:
+            for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                digest.update(chunk)
+        return digest.hexdigest()

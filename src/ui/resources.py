@@ -12,5 +12,13 @@ def resource_path(relative_path: str) -> str:
     return str(base / relative_path)
 
 
+def app_icon_path() -> str:
+    if hasattr(sys, "_MEIPASS"):
+        base = Path(sys._MEIPASS) / "assets"
+    else:
+        base = Path(__file__).resolve().parents[2] / "assets"
+    return str(base / "app_icon.ico")
+
+
 def stylesheet() -> str:
     return Path(resource_path("styles/app.qss")).read_text(encoding="utf-8")

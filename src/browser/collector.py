@@ -1,14 +1,15 @@
 from __future__ import annotations
 
 import re
-import shutil
 import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
 from urllib.parse import quote_plus, urljoin, urlparse
 
-from playwright.sync_api import BrowserContext, Error as PlaywrightError, Page, sync_playwright
+from playwright.sync_api import Error as PlaywrightError, Page
+
+from src.browser.session import BrowserSession
 
 
 @dataclass(frozen=True)
@@ -16,30 +17,23 @@ class ImageCandidate:
     image_url: str
     pin_url: str
     source_page_url: str = ""
+    post_url: str = ""
+    platform: str = "pinterest"
+    author_username: str = ""
+    is_repost: bool = False
+    media_type: str = "image"
+    media_url: str = ""
+    media_identity: str = ""
+    duration: float | None = None
+    video_width: int | None = None
+    video_height: int | None = None
+    bitrate: int | None = None
 
 
-class PinterestCollector:
+class PinterestCollector(BrowserSession):
     """Collects image resource URLs visible in Pinterest's public search UI."""
     def __init__(self, profile_dir: Path, log: Callable[[str], None]) -> None:
-        self.profile_dir, self.log = profile_dir, log
-        self._playwright = None
-        self._context: BrowserContext | None = None
-        self._page: Page | None = None
-
-    def open(self) -> None:
-        self.profile_dir.mkdir(parents=True, exist_ok=True)
-        self._playwright = sync_playwright().start()
-        options: dict[str, object] = {"headless": False, "viewport": {"width": 1366, "height": 900}}
-        try:
-            self._context = self._playwright.chromium.launch_persistent_context(str(self.profile_dir), **options)
-        except Exception as exc:
-            chrome = self._find_chrome()
-            if not chrome:
-                raise RuntimeError("未找到 Playwright Chromium，也未找到本机 Chrome；请执行 playwright install chromium") from exc
-            self.log(f"Playwright Chromium 不可用，改用本机 Chrome：{chrome}")
-            options["executable_path"] = chrome
-            self._context = self._playwright.chromium.launch_persistent_context(str(self.profile_dir), **options)
-        self._page = self._context.pages[0] if self._context.pages else self._context.new_page()
+        super().__init__(profile_dir, log)
 
     def collect(
         self,
@@ -289,17 +283,3 @@ class PinterestCollector:
                 number = int(re.sub(r"\D", "", bits[1])) if len(bits) > 1 and re.sub(r"\D", "", bits[1]) else 0
                 choices.append((bits[0], number))
         return max(choices, key=lambda pair: pair[1])[0] if choices else ""
-
-    def close(self) -> None:
-        if self._context: self._context.close()
-        if self._playwright: self._playwright.stop()
-        self._context = self._page = self._playwright = None
-
-    @staticmethod
-    def _find_chrome() -> str | None:
-        candidates = [
-            shutil.which("chrome"),
-            r"C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe",
-            r"C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe",
-        ]
-        return next((path for path in candidates if path and Path(path).is_file()), None)
