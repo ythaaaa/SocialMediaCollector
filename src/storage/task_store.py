@@ -38,6 +38,7 @@ class TaskStore:
         data["platform"] = config.canonical_platform()
         data["collection_mode"] = config.canonical_collection_mode()
         data["media_type"] = config.canonical_media_type()
+        data["search_scope"] = config.canonical_search_scope()
         data["mode"] = data["collection_mode"]
         if config.canonical_platform() == "x" and config.canonical_collection_mode() == "author":
             username, profile_url = config.canonical_author()
@@ -65,7 +66,7 @@ class TaskStore:
         data["stopped"] = stopped
         if error:
             data["error"] = error
-        data["result"] = {key: getattr(stats, key) for key in ("discovered", "downloaded", "skipped", "failed")}
+        data["result"] = {key: getattr(stats, key) for key in ("discovered", "downloaded", "skipped", "duplicate_count", "failed")}
         path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
 
     def known_hashes(self) -> set[str]:

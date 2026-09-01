@@ -27,6 +27,7 @@ class QueueStore:
         data["platform"] = config.canonical_platform()
         data["collection_mode"] = config.canonical_collection_mode()
         data["media_type"] = config.canonical_media_type()
+        data["search_scope"] = config.canonical_search_scope()
         return data
 
     def save(self, tasks: Iterable[QueueTask]) -> None:

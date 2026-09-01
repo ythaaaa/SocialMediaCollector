@@ -3,6 +3,7 @@ from __future__ import annotations
 import re
 import subprocess
 import tempfile
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
@@ -72,6 +73,8 @@ def select_variant(master_text: str, master_url: str) -> tuple[str, int | None, 
 
 
 class HLSDownloader:
+    _MEDIA_DOWNLOAD_TIMEOUT_SECONDS = 180.0
+
     def __init__(
         self,
         client: httpx.Client,
@@ -85,44 +88,59 @@ class HLSDownloader:
         self.retry_count = retry_count
         self.should_stop = should_stop
         self.should_pause = should_pause
+        self._deadline: float | None = None
 
     def download(self, playlist_url: str, output_path: Path) -> HLSResult:
         ffmpeg = find_ffmpeg()
         if not ffmpeg:
             raise HLSDownloadError("未检测到 FFmpeg，无法保存 X 视频；图片采集不受影响。")
-        master_text = self._get_text(playlist_url)
-        video_url, width, height, bitrate, audio_url = select_variant(master_text, playlist_url)
-        with tempfile.TemporaryDirectory(prefix="x-hls-") as raw_temp:
-            temp_dir = Path(raw_temp)
-            video_manifest, duration = self._materialize_playlist(video_url, temp_dir / "video", "video.m3u8")
-            audio_manifest = None
-            if audio_url:
-                audio_manifest, _audio_duration = self._materialize_playlist(audio_url, temp_dir / "audio", "audio.m3u8")
-            command = [
-                ffmpeg,
-                "-y",
-                "-loglevel",
-                "error",
-                "-allowed_extensions",
-                "ALL",
-                "-protocol_whitelist",
-                "file,crypto,data",
-                "-i",
-                str(video_manifest),
-            ]
-            if audio_manifest:
-                command.extend(["-i", str(audio_manifest)])
-            command.extend(["-map", "0:v:0"])
-            if audio_manifest:
-                command.extend(["-map", "1:a:0?"])
-            command.extend(["-c", "copy", "-movflags", "+faststart", str(output_path)])
-            try:
-                result = subprocess.run(command, capture_output=True, text=True, timeout=180)
-            except subprocess.SubprocessError as exc:
-                raise HLSDownloadError("FFmpeg 执行失败。") from exc
-            if result.returncode != 0 or not output_path.exists() or output_path.stat().st_size < 1024:
-                raise HLSDownloadError("FFmpeg 无法封装 X HLS 视频。")
-        return HLSResult(duration=duration, width=width, height=height, bitrate=bitrate)
+        self._deadline = time.monotonic() + self._MEDIA_DOWNLOAD_TIMEOUT_SECONDS
+        try:
+            master_text = self._get_text(playlist_url)
+            video_url, width, height, bitrate, audio_url = select_variant(master_text, playlist_url)
+            with tempfile.TemporaryDirectory(prefix="x-hls-") as raw_temp:
+                temp_dir = Path(raw_temp)
+                video_manifest, duration = self._materialize_playlist(video_url, temp_dir / "video", "video.m3u8")
+                audio_manifest = None
+                if audio_url:
+                    audio_manifest, _audio_duration = self._materialize_playlist(audio_url, temp_dir / "audio", "audio.m3u8")
+                command = [
+                    ffmpeg,
+                    "-y",
+                    "-loglevel",
+                    "error",
+                    "-allowed_extensions",
+                    "ALL",
+                    "-protocol_whitelist",
+                    "file,crypto,data",
+                    "-i",
+                    str(video_manifest),
+                ]
+                if audio_manifest:
+                    command.extend(["-i", str(audio_manifest)])
+                command.extend(["-map", "0:v:0"])
+                if audio_manifest:
+                    command.extend(["-map", "1:a:0?"])
+                command.extend(["-c", "copy", "-movflags", "+faststart", str(output_path)])
+                if self._deadline is not None and time.monotonic() >= self._deadline:
+                    raise HLSDownloadError("X 视频 HLS 下载超时，已跳过当前候选。")
+                ffmpeg_timeout = self._MEDIA_DOWNLOAD_TIMEOUT_SECONDS
+                if self._deadline is not None:
+                    ffmpeg_timeout = max(1.0, self._deadline - time.monotonic())
+                try:
+                    result = subprocess.run(
+                        command,
+                        capture_output=True,
+                        text=True,
+                        timeout=ffmpeg_timeout,
+                    )
+                except subprocess.SubprocessError as exc:
+                    raise HLSDownloadError("FFmpeg 执行失败。") from exc
+                if result.returncode != 0 or not output_path.exists() or output_path.stat().st_size < 1024:
+                    raise HLSDownloadError("FFmpeg 无法封装 X HLS 视频。")
+            return HLSResult(duration=duration, width=width, height=height, bitrate=bitrate)
+        finally:
+            self._deadline = None
 
     def _get_text(self, url: str) -> str:
         response = self._get(url)
@@ -136,6 +154,8 @@ class HLSDownloader:
         for attempt in range(self.retry_count):
             if self.should_stop():
                 raise HLSDownloadCancelled()
+            if self._deadline is not None and time.monotonic() >= self._deadline:
+                raise HLSDownloadError("X 视频 HLS 下载超时，已跳过当前候选。")
             self.should_pause()
             try:
                 response = self.client.get(url, headers=self.headers)

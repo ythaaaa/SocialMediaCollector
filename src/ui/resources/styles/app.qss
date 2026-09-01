@@ -9,8 +9,12 @@ QLabel#inlineLabel { font-size: 13px; color: #52616A; font-weight: 600; }
 QLabel#statusText { font-size: 14px; font-weight: 600; color: #2D5760; }
 QLabel#progressPercent { font-size: 18px; font-weight: 700; color: #1E737A; }
 QLabel#taskPath { font-size: 12px; color: #74818A; }
-QLineEdit, QSpinBox, QDoubleSpinBox { background: #FFFFFF; border: 1px solid #CBD7DA; border-radius: 7px; padding: 0 11px; color: #29363E; font-size: 14px; selection-background-color: #BCE0E2; }
-QLineEdit:focus, QSpinBox:focus, QDoubleSpinBox:focus { border: 2px solid #2C858C; }
+QLineEdit, QComboBox, QSpinBox, QDoubleSpinBox { min-height: 36px; background: #FFFFFF; border: 1px solid #CBD7DA; border-radius: 7px; padding: 0 11px; color: #29363E; font-size: 14px; selection-background-color: #BCE0E2; }
+QLineEdit:focus, QComboBox:focus, QSpinBox:focus, QDoubleSpinBox:focus { border: 2px solid #2C858C; }
+QComboBox { padding-right: 34px; }
+QComboBox::drop-down { subcontrol-origin: padding; subcontrol-position: top right; width: 32px; border: none; background: transparent; }
+QComboBox::down-arrow { image: url(CHEVRON_DOWN_PATH); width: 14px; height: 14px; }
+QComboBox QAbstractItemView { background: #FFFFFF; border: 1px solid #CBD7DA; selection-background-color: #DCEFF0; color: #29363E; }
 QSpinBox::up-button, QDoubleSpinBox::up-button, QSpinBox::down-button, QDoubleSpinBox::down-button { width: 20px; border: none; background: #F3F7F8; }
 QPushButton, QToolButton { min-height: 36px; padding: 0 16px; border: 1px solid #B9C9CD; border-radius: 7px; background: #FFFFFF; color: #36525A; font-size: 14px; font-weight: 600; }
 QPushButton:hover, QToolButton:hover { border-color: #5D9CA1; background: #F3FAFA; }
@@ -18,6 +22,14 @@ QPushButton:pressed, QToolButton:pressed { background: #E8F4F4; }
 QPushButton:disabled { color: #A9B4B8; border-color: #E1E7E9; background: #F4F6F7; }
 QPushButton#primaryButton { background: #2C858C; border-color: #2C858C; color: white; font-size: 15px; }
 QPushButton#primaryButton:hover { background: #246F75; border-color: #246F75; }
+QPushButton#secondaryButton { background: #F8FAFA; color: #52616A; border-color: #D5E0E2; }
+QPushButton#secondaryButton:hover { background: #EEF6F6; border-color: #9DBABD; }
+QCheckBox#modeSwitch { background: #EEF7F7; border: 1px solid #C7E0E1; border-radius: 7px; padding: 8px 10px; color: #245A61; font-weight: 700; }
+QToolButton#sectionToggle { padding: 0; border: none; background: transparent; color: #2C858C; font-weight: 700; }
+QTabWidget::pane { border: 1px solid #E2E8EB; border-radius: 10px; background: #F3F6F7; top: -1px; }
+QTabBar::tab { min-height: 38px; padding: 0 24px; margin-right: 5px; border: 1px solid transparent; border-radius: 8px 8px 0 0; color: #6C7A82; font-size: 14px; font-weight: 700; }
+QTabBar::tab:selected { color: #1E737A; background: #FFFFFF; border-color: #E2E8EB; border-bottom-color: #FFFFFF; }
+QTabBar::tab:hover { color: #2C858C; background: #F8FAFA; }
 QPushButton[attention="true"] { background: #EAF7F4; border-color: #61AA8E; color: #287157; }
 QProgressBar { min-height: 14px; border: 0; border-radius: 7px; background: #E6EFF0; }
 QProgressBar::chunk { background: #2C858C; border-radius: 7px; }

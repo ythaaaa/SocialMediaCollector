@@ -110,34 +110,13 @@ class PinterestCollector(BrowserSession):
     ) -> list[ImageCandidate]:
         """Collect from the user's current Pinterest tab without navigating it."""
         if not self._context:
-            raise RuntimeError("浏览器未初始化")
+            raise RuntimeError("请先点击『打开浏览器 / 登录』，在 Pinterest 中打开需要采集的页面，然后开始下载。")
 
-        page = self._select_pinterest_page()
+        page = self.prepare_current_page()
         if page is None:
-            page = self._page or self._context.new_page()
-            opened_from_blank = page.url in {"", "about:blank"}
-            if opened_from_blank:
-                page.goto("https://www.pinterest.com/", wait_until="domcontentloaded", timeout=60000)
-            self.log("当前页面模式：请在浏览器中打开目标 Pinterest 页面，程序不会自动切换到搜索页。")
-            if opened_from_blank:
-                self.log("浏览器已启动，等待你导航到目标页面（最长 8 秒；保持首页即可采集首页内容）。")
-                for _ in range(8):
-                    if should_stop():
-                        return []
-                    should_pause()
-                    page.wait_for_timeout(1000)
-            deadline = time.monotonic() + 120
-            while time.monotonic() < deadline and not should_stop():
-                should_pause()
-                page = self._select_pinterest_page()
-                if page is not None:
-                    break
-                page.wait_for_timeout(1000)
-
-        if page is None or not self._is_pinterest_page(page):
-            raise RuntimeError("当前页面不是 Pinterest 页面，请先在浏览器中打开目标页面。")
-        self._page = page
+            raise RuntimeError("请先在托管浏览器中打开需要采集的 Pinterest 页面，然后开始下载。")
         source_url = page.url
+        self.log(f"当前页面：{source_url}")
         self.log(f"当前页面采集开始：{source_url}")
         return self._collect_page(
             page,
@@ -151,6 +130,21 @@ class PinterestCollector(BrowserSession):
             require_pin=False,
             empty_message="当前 Pinterest 页面没有检测到可采集图片。",
         )
+
+    def prepare_current_page(self) -> Page | None:
+        """Select the active Pinterest tab without opening or navigating a page."""
+        if not self._context:
+            return None
+        try:
+            page = self._select_pinterest_page()
+        except Exception:
+            self._context = None
+            self._page = None
+            return None
+        if page is None or not self._is_pinterest_page(page):
+            return None
+        self._page = page
+        return page
 
     def _collect_page(
         self,

@@ -7,9 +7,9 @@ from pathlib import Path
 import pytest
 
 from src.downloader import queue_runner as runner_module
-from src.models import TaskConfig
-from src.storage import QueueStore
-from src.tasks import BatchInputError, QueueTask, build_batch_configs, parse_batch_sources
+from src.models import TaskConfig, TaskStats
+from src.storage import CollectorDatabase, QueueStore
+from src.tasks import BatchInputError, QueueTask, build_batch_configs, parse_batch_sources, remove_queue_tasks
 from src.utils.paths import create_task_directory, safe_folder_name
 
 
@@ -41,6 +41,39 @@ def test_x_batch_normalizes_three_author_formats() -> None:
     assert [config.canonical_source_value for config in configs] == ["AIVideoHub_", "some_author", "example"]
 
 
+def test_x_search_batch_builds_keyword_tasks_and_deduplicates() -> None:
+    configs = build_batch_configs(
+        _base_config("x", "search"),
+        "AI illustration\n\n ai illustration \nGPT Image\nproduct photography",
+    )
+    assert [config.canonical_source_value for config in configs] == [
+        "AI illustration", "GPT Image", "product photography"
+    ]
+    assert all(config.collection_mode == "search" for config in configs)
+
+
+def test_x_search_batch_inherits_scope_and_media_type() -> None:
+    configs = build_batch_configs(
+        TaskConfig(
+            "",
+            2,
+            Path("downloads"),
+            platform="x",
+            collection_mode="search",
+            source_identifier="",
+            media_type="video",
+            search_scope="top",
+        ),
+        "AI video\nfashion video\ncinematic video",
+    )
+
+    assert [config.canonical_source_value for config in configs] == [
+        "AI video", "fashion video", "cinematic video"
+    ]
+    assert all(config.canonical_search_scope() == "top" for config in configs)
+    assert all(config.canonical_media_type() == "video" for config in configs)
+
+
 def test_queue_tasks_create_sibling_directories_under_one_save_root(tmp_path: Path) -> None:
     configs = build_batch_configs(
         TaskConfig("", 5, tmp_path, platform="pinterest", collection_mode="search", interval_seconds=0),
@@ -50,6 +83,61 @@ def test_queue_tasks_create_sibling_directories_under_one_save_root(tmp_path: Pa
 
     assert all(config.output_root == tmp_path for config in configs)
     assert all(directory.parent == tmp_path for directory in directories)
+
+
+def test_remove_selected_tasks_updates_queue_json_and_reload(tmp_path: Path) -> None:
+    store = QueueStore(tmp_path / "queue.json")
+    tasks = _runner_tasks("one", "two", "three")
+    store.save(tasks)
+
+    tasks[:] = remove_queue_tasks(tasks, {tasks[1].task_id})
+    store.save(tasks)
+
+    assert [task.config.keyword for task in store.load()] == ["one", "three"]
+
+
+def test_remove_multiple_selected_tasks_and_keep_x_and_pinterest_tasks(tmp_path: Path) -> None:
+    pinterest = QueueTask(TaskConfig("cats", 1, tmp_path, platform="pinterest", collection_mode="search"))
+    x_search = QueueTask(TaskConfig("", 1, tmp_path, platform="x", collection_mode="search", source_identifier="cats"))
+    x_author = QueueTask(TaskConfig("", 1, tmp_path, platform="x", collection_mode="author", source_identifier="author"))
+    tasks = [pinterest, x_search, x_author]
+
+    remaining = remove_queue_tasks(tasks, {pinterest.task_id, x_author.task_id})
+
+    assert remaining == [x_search]
+
+
+def test_running_task_is_protected_from_queue_removal(tmp_path: Path) -> None:
+    tasks = _runner_tasks("running", "pending")
+    tasks[0].status = "running"
+
+    with pytest.raises(ValueError, match="运行中的任务请先停止后再移除"):
+        remove_queue_tasks(tasks, {tasks[0].task_id})
+    assert [task.config.keyword for task in tasks] == ["running", "pending"]
+
+
+def test_clear_pending_keeps_completed_and_failed_tasks(tmp_path: Path) -> None:
+    tasks = _runner_tasks("pending", "completed", "failed")
+    tasks[1].status = "completed"
+    tasks[2].status = "failed"
+    store = QueueStore(tmp_path / "queue.json")
+
+    tasks[:] = [task for task in tasks if task.status != "pending"]
+    store.save(tasks)
+
+    assert [task.status for task in store.load()] == ["completed", "failed"]
+
+
+def test_queue_removal_does_not_delete_task_history(tmp_path: Path) -> None:
+    database = CollectorDatabase(tmp_path / "collector.db")
+    config = TaskConfig("kept-history", 1, tmp_path)
+    database.start_task(config, tmp_path / "output")
+    database.finish_task(config, TaskStats(downloaded=1), "completed", task_output_dir=tmp_path / "output")
+    tasks = [QueueTask(config)]
+
+    tasks[:] = remove_queue_tasks(tasks, {config.task_id})
+
+    assert database.get_history(config.task_id)["status"] == "completed"
 
 
 def test_batch_invalid_line_reports_line_number() -> None:
@@ -116,6 +204,35 @@ def test_failed_task_does_not_stop_following_task(monkeypatch, tmp_path: Path) -
     assert tasks[0].status == "failed"
     assert tasks[0].error == "mock failure"
     assert tasks[1].status == "completed"
+
+
+def test_queue_runner_continues_with_remaining_tasks_after_pending_removal(monkeypatch, tmp_path: Path) -> None:
+    order: list[str] = []
+    tasks = _runner_tasks("one", "two", "three")
+
+    class FakeEngine:
+        def __init__(self, config, profile_dir, on_log, on_stats) -> None:
+            self.config = config
+
+        def run(self):
+            order.append(self.config.keyword)
+            if self.config.keyword == "one":
+                tasks[:] = [task for task in tasks if task.config.keyword != "two"]
+
+        def pause(self):
+            return None
+
+        def resume(self):
+            return None
+
+        def stop(self):
+            return None
+
+    monkeypatch.setattr(runner_module, "DownloadEngine", FakeEngine)
+    runner_module.QueueRunner(tasks, tmp_path / "profile", QueueStore(tmp_path / "queue.json")).run()
+
+    assert order == ["one", "three"]
+    assert [task.status for task in tasks] == ["completed", "completed"]
 
 
 def test_pause_blocks_next_task_until_stopped(monkeypatch, tmp_path: Path) -> None:

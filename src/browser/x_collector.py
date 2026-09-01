@@ -15,6 +15,62 @@ from src.extractors import PromptDetector
 from src.utils.x import normalize_x_author
 
 
+def build_x_search_query(keyword: str, media_type: str = "image") -> str:
+    """Build the internal X query without changing the stored source value."""
+    operators = {
+        "image": "filter:images",
+        "video": "filter:native_video",
+        "mixed": "filter:media",
+    }
+    operator = operators.get((media_type or "image").strip().lower(), "filter:images")
+    return f"{keyword.strip()} {operator}"
+
+
+def build_x_search_url(keyword: str, search_scope: str = "media", media_type: str = "image") -> str:
+    scope = search_scope.strip().lower() if search_scope else "media"
+    if scope not in {"media", "top"}:
+        scope = "media"
+    return "https://x.com/search?" + urlencode({
+        "q": build_x_search_query(keyword, media_type),
+        "src": "typed_query",
+        "f": scope,
+    })
+
+
+@dataclass
+class XMediaGridDiagnostics:
+    grid_item_count: int = 0
+    status_link_count: int = 0
+    image_item_count: int = 0
+    video_item_count: int = 0
+    media_candidate_count: int = 0
+    duplicate_count: int = 0
+    hls_failed_count: int = 0
+
+    def signature(self) -> tuple[int, ...]:
+        return (
+            self.grid_item_count,
+            self.status_link_count,
+            self.image_item_count,
+            self.video_item_count,
+            self.media_candidate_count,
+            self.duplicate_count,
+            self.hls_failed_count,
+        )
+
+    def as_log_message(self) -> str:
+        return (
+            "X Media 扫描："
+            f"gridItems={self.grid_item_count} "
+            f"statusLinks={self.status_link_count} "
+            f"imageItems={self.image_item_count} "
+            f"videoItems={self.video_item_count} "
+            f"mediaCandidates={self.media_candidate_count} "
+            f"duplicates={self.duplicate_count} "
+            f"hlsFailed={self.hls_failed_count}"
+        )
+
+
 @dataclass
 class XScanDiagnostics:
     article_count: int = 0
@@ -73,6 +129,9 @@ class XScanDiagnostics:
 class XCollector(PinterestCollector):
     """Collect image media from an X author's visible profile timeline."""
 
+    _MEDIA_VIDEO_PAGE_TIMEOUT_MS = 20_000
+    _MEDIA_VIDEO_HLS_TIMEOUT_SECONDS = 20.0
+
     def __init__(self, profile_dir, log, debug_dir: Path | None = None) -> None:
         super().__init__(profile_dir, log)
         self.prompt_detector = PromptDetector()
@@ -84,6 +143,12 @@ class XCollector(PinterestCollector):
         self._prompt_sample_keys: set[str] = set()
         self._prompt_sample_count = 0
         self._prompt_miss_logged = False
+        self.last_media_grid_diagnostics = XMediaGridDiagnostics()
+        self._last_media_grid_signature: tuple[int, ...] | None = None
+        self._media_debug_saved = False
+        self._media_video_attempted: set[str] = set()
+        self._media_video_skipped: set[str] = set()
+        self._media_post_text_cache: dict[str, str] = {}
 
     def collect_author(
         self,
@@ -156,6 +221,387 @@ class XCollector(PinterestCollector):
             only_prompt_posts,
         )
 
+    def collect_search(
+        self,
+        keyword: str,
+        wanted: int,
+        max_scrolls: int,
+        should_stop: Callable[[], bool],
+        should_pause: Callable[[], None],
+        on_found: Callable[[int], None],
+        on_candidate: Callable[[ImageCandidate], None] | None = None,
+        should_finish: Callable[[], bool] | None = None,
+        media_type: str = "image",
+        only_prompt_posts: bool = False,
+        search_scope: str = "media",
+        should_skip_candidate: Callable[[ImageCandidate], bool] | None = None,
+    ) -> list[ImageCandidate]:
+        if not self._page:
+            raise RuntimeError("浏览器未初始化")
+        normalized_scope = search_scope.strip().lower() if search_scope else "media"
+        search_url = build_x_search_url(keyword, normalized_scope, media_type)
+        page = self._page
+        self._prepare_video_capture(page)
+        page.goto(search_url, wait_until="domcontentloaded", timeout=60000)
+        scope_label = "热门" if normalized_scope == "top" else "媒体"
+        media_label = {"image": "仅图片", "video": "仅视频", "mixed": "图片 + 视频"}.get(media_type, media_type)
+        operator = build_x_search_query(keyword, media_type).rsplit(" ", 1)[-1]
+        self.log(
+            f"X 关键词搜索：关键词：{keyword.strip()} 搜索范围：{scope_label} "
+            f"下载类型：{media_label} 搜索过滤：{operator}"
+        )
+        self.log(f"X 关键词搜索已打开：{search_url}；如需登录，请在浏览器中人工完成。")
+        if normalized_scope == "media":
+            return self._collect_media_grid(
+                page,
+                search_url,
+                wanted,
+                max_scrolls,
+                should_stop,
+                should_pause,
+                on_found,
+                on_candidate,
+                should_finish,
+                media_type,
+                only_prompt_posts,
+                should_skip_candidate,
+            )
+        return self._collect_timeline(
+            page,
+            "",
+            search_url,
+            wanted,
+            max_scrolls,
+            False,
+            should_stop,
+            should_pause,
+            on_found,
+            on_candidate,
+            should_finish,
+            media_type,
+            only_prompt_posts,
+        )
+
+    def _collect_media_grid(
+        self,
+        page: Page,
+        source_url: str,
+        wanted: int,
+        max_scrolls: int,
+        should_stop: Callable[[], bool],
+        should_pause: Callable[[], None],
+        on_found: Callable[[int], None],
+        on_candidate: Callable[[ImageCandidate], None] | None,
+        should_finish: Callable[[], bool] | None,
+        media_type: str,
+        only_prompt_posts: bool,
+        should_skip_candidate: Callable[[ImageCandidate], bool] | None = None,
+    ) -> list[ImageCandidate]:
+        candidates: dict[str, ImageCandidate] = {}
+        self._media_video_skipped.clear()
+        finish = should_finish or (lambda: False)
+        deadline = time.monotonic() + 120
+        diagnostics = XMediaGridDiagnostics()
+        while time.monotonic() < deadline and not should_stop():
+            should_pause()
+            diagnostics = self._collect_visible_media_grid(
+                page, source_url, candidates, on_candidate, media_type, only_prompt_posts, should_skip_candidate, finish
+            )
+            on_found(len(candidates))
+            if candidates or finish():
+                break
+            page.wait_for_timeout(1500)
+        if should_stop():
+            return list(candidates.values())
+        if not candidates and not finish():
+            self._save_media_debug_snapshot_if_needed(page, diagnostics)
+            if diagnostics.grid_item_count == 0:
+                raise RuntimeError("X 媒体搜索页未检测到素材卡片，可能页面加载失败、登录状态异常或 X 页面结构发生变化。")
+            raise RuntimeError("已检测到 X 媒体结果，但没有符合当前下载类型的素材。")
+
+        stale_rounds = 0
+        for _ in range(max_scrolls + 1):
+            if should_stop() or finish():
+                break
+            should_pause()
+            before = len(candidates) + len(self._media_video_skipped)
+            diagnostics = self._collect_visible_media_grid(
+                page, source_url, candidates, on_candidate, media_type, only_prompt_posts, should_skip_candidate, finish
+            )
+            on_found(len(candidates))
+            if finish():
+                break
+            progress = len(candidates) + len(self._media_video_skipped)
+            stale_rounds = stale_rounds + 1 if progress == before else 0
+            if stale_rounds >= 8:
+                self.log("连续滚动未发现新的 X 媒体卡片，结束采集；可能页面暂无更多内容。")
+                break
+            page.mouse.wheel(0, 1800)
+            page.wait_for_timeout(1200)
+        return list(candidates.values())
+
+    def _collect_visible_media_grid(
+        self,
+        page: Page,
+        source_url: str,
+        candidates: dict[str, ImageCandidate],
+        on_candidate: Callable[[ImageCandidate], None] | None,
+        media_type: str,
+        only_prompt_posts: bool = False,
+        should_skip_candidate: Callable[[ImageCandidate], bool] | None = None,
+        should_finish: Callable[[], bool] | None = None,
+    ) -> XMediaGridDiagnostics:
+        payload = page.locator('a[href*="/status/"]').evaluate_all(
+            r'''
+            (anchors) => Array.from(new Set(anchors)).map((anchor) => {
+              const href = anchor.href || '';
+              const images = Array.from(anchor.querySelectorAll('img')).map((img) => [
+                img.currentSrc || '', img.src || '',
+                ...(img.srcset || '').split(',').map(value => value.trim().split(/\s+/)[0]),
+              ]).flat().filter(Boolean);
+              const labels = [anchor.getAttribute('aria-label') || '']
+                .concat(Array.from(anchor.querySelectorAll('[aria-label], [data-testid]')).map(node => (
+                  `${node.getAttribute('aria-label') || ''} ${node.getAttribute('data-testid') || ''}`
+                ))).join(' ');
+              const path = (() => { try { return new URL(href, window.location.origin).pathname; } catch (_) { return ''; } })();
+              const video = /\/(?:video|amplify_video|ext_tw_video)(?:\/|_)/i.test(path)
+                || images.some(url => /(?:ext_tw_video_thumb|amplify_video_thumb)/i.test(url))
+                || Boolean(anchor.querySelector('video'))
+                || /video|视频|播放/i.test(labels);
+              return {href, images: Array.from(new Set(images)), video};
+            })
+            '''
+        )
+        diagnostics = XMediaGridDiagnostics(grid_item_count=len(payload))
+        for item in payload:
+            if should_finish and should_finish():
+                break
+            status_url = self._normalize_status_url(str(item.get("href") or ""))
+            if not status_url:
+                continue
+            diagnostics.status_link_count += 1
+            raw_images = [
+                str(url) for url in item.get("images") or []
+                if re.search(r"pbs\.twimg\.com/media/", str(url), re.IGNORECASE)
+            ]
+            image_urls = list(dict.fromkeys(
+                self._prefer_original_url(url)
+                for url in raw_images
+                if not re.search(r"(?:ext_tw_video_thumb|amplify_video_thumb)", url, re.IGNORECASE)
+            ))
+            post_text = ""
+            detection = self.prompt_detector.detect("")
+            if only_prompt_posts:
+                post_text = self._resolve_media_post_text(status_url)
+                detection = self.prompt_detector.detect(post_text)
+                if not detection.prompt_detected:
+                    continue
+            is_video = bool(item.get("video"))
+            if is_video:
+                diagnostics.video_item_count += 1
+                if media_type not in {"video", "mixed"}:
+                    continue
+                poster = next((str(url) for url in item.get("images") or [] if url), "")
+                post_id = self._post_id(status_url)
+                identity = self._video_identity(poster) or post_id or status_url
+                probe = ImageCandidate(
+                    image_url="",
+                    pin_url=status_url,
+                    source_page_url=page.url or source_url,
+                    post_url=status_url,
+                    platform="x",
+                    author_username=self._author_from_status_url(status_url),
+                    media_type="video",
+                    media_identity=identity,
+                    post_id=post_id,
+                    post_text=post_text,
+                    prompt_detected=detection.prompt_detected,
+                    prompt=detection.prompt,
+                )
+                skip_key = f"{post_id}:{identity}"
+                if skip_key in self._media_video_skipped:
+                    continue
+                if should_skip_candidate and should_skip_candidate(probe):
+                    self._media_video_skipped.add(skip_key)
+                    diagnostics.duplicate_count += 1
+                    continue
+                if should_finish and should_finish():
+                    break
+                playlist = self._resolve_media_video_playlist(page, status_url, poster)
+                if not playlist:
+                    diagnostics.hls_failed_count += 1
+                    continue
+                key = f"video:{post_id}:{identity}"
+                if key in candidates:
+                    continue
+                candidate = ImageCandidate(
+                    image_url=playlist,
+                    pin_url=status_url,
+                    source_page_url=page.url or source_url,
+                    post_url=status_url,
+                    platform="x",
+                    author_username=self._author_from_status_url(status_url),
+                    media_type="video",
+                    media_url=playlist,
+                    media_identity=identity,
+                    post_id=post_id,
+                    post_text=post_text,
+                    prompt_detected=detection.prompt_detected,
+                    prompt=detection.prompt,
+                )
+                candidates[key] = candidate
+                diagnostics.media_candidate_count += 1
+                if on_candidate:
+                    on_candidate(candidate)
+                continue
+
+            diagnostics.image_item_count += len(image_urls)
+            if media_type not in {"image", "mixed"}:
+                continue
+            for image_url in image_urls:
+                if image_url in candidates:
+                    continue
+                candidate = ImageCandidate(
+                    image_url=image_url,
+                    pin_url=status_url,
+                    source_page_url=page.url or source_url,
+                    post_url=status_url,
+                    platform="x",
+                    author_username=self._author_from_status_url(status_url),
+                    media_type="image",
+                    media_url=image_url,
+                    media_identity=image_url,
+                    post_id=self._post_id(status_url),
+                    post_text=post_text,
+                    prompt_detected=detection.prompt_detected,
+                    prompt=detection.prompt,
+                )
+                candidates[image_url] = candidate
+                diagnostics.media_candidate_count += 1
+                if on_candidate:
+                    on_candidate(candidate)
+
+        self.last_media_grid_diagnostics = diagnostics
+        if diagnostics.signature() != self._last_media_grid_signature:
+            self.log(diagnostics.as_log_message())
+            self._last_media_grid_signature = diagnostics.signature()
+        return diagnostics
+
+    def _resolve_media_post_text(self, status_url: str) -> str:
+        if status_url in self._media_post_text_cache:
+            return self._media_post_text_cache[status_url]
+        if not self._context:
+            return ""
+        detail_page = None
+        text = ""
+        try:
+            detail_page = self._context.new_page()
+            detail_page.goto(status_url, wait_until="domcontentloaded", timeout=60000)
+            detail_page.wait_for_timeout(1500)
+            texts = detail_page.locator('[data-testid="tweetText"]').all_inner_texts()
+            text = next((value.strip() for value in texts if value.strip()), "")
+        except Exception as exc:
+            self.log(f"X 媒体正文解析失败，按无 Prompt 处理：{exc}")
+        finally:
+            self._media_post_text_cache[status_url] = text
+            if detail_page:
+                try:
+                    detail_page.close()
+                except Exception:
+                    pass
+        return text
+
+    def _resolve_media_video_playlist(self, page: Page, status_url: str, poster: str) -> str:
+        playlist = self._playlist_for_video(poster)
+        if playlist:
+            return playlist
+        if status_url in self._media_video_attempted or not self._context:
+            return ""
+        self._media_video_attempted.add(status_url)
+        detail_page = None
+        post_id = self._post_id(status_url)
+        self.log(f"Media视频候选：post_id={post_id or '-'} status_url={status_url}")
+        try:
+            self.log("Media视频阶段=auxiliary_page_created")
+            detail_page = self._context.new_page()
+            return self._capture_media_video_playlist(detail_page, status_url, poster)
+        except Exception as exc:
+            self.log(f"X 媒体视频详情解析失败，failed_stage=page_load，已跳过：{exc}")
+            return ""
+        finally:
+            if detail_page:
+                try:
+                    self.log("Media视频阶段=auxiliary_page_closed")
+                    detail_page.close()
+                except Exception:
+                    pass
+
+    def _capture_media_video_playlist(self, detail_page: Page, status_url: str, poster: str) -> str:
+        """Capture one status page's HLS playlist without sharing listener state."""
+        captured: list[str] = []
+        expected_identity = self._video_identity(poster)
+
+        def on_response(response) -> None:
+            try:
+                url = response.url
+                parts = urlsplit(url)
+                if parts.netloc.lower() != "video.twimg.com" or not parts.path.lower().endswith(".m3u8"):
+                    return
+                playlist_path = parts.path.split("/pl/", 1)[-1]
+                if "/" in playlist_path:
+                    return
+                identity = self._video_identity(parts.path)
+                if expected_identity and identity and identity != expected_identity:
+                    return
+                if url not in captured:
+                    captured.append(url)
+                self._remember_video_playlist(url)
+            except Exception:
+                return
+
+        detail_page.on("response", on_response)
+        try:
+            self.log("Media视频阶段=opening_status_page")
+            detail_page.goto(
+                status_url,
+                wait_until="domcontentloaded",
+                timeout=self._MEDIA_VIDEO_PAGE_TIMEOUT_MS,
+            )
+            self.log("Media视频阶段=status_page_loaded")
+            self.log("Media视频阶段=waiting_for_hls")
+            try:
+                detail_page.locator("video").evaluate_all(
+                    "videos => videos.forEach(video => { try { video.muted = true; video.play?.().catch?.(() => {}); } catch (_) {} })"
+                )
+            except Exception:
+                pass
+            deadline = time.monotonic() + self._MEDIA_VIDEO_HLS_TIMEOUT_SECONDS
+            while not captured and time.monotonic() < deadline:
+                detail_page.wait_for_timeout(250)
+            if not captured:
+                self.log("Media视频阶段失败：failed_stage=hls_capture，等待超时")
+                return ""
+            self.log("Media视频阶段=hls_captured")
+            return captured[0]
+        except Exception as exc:
+            self.log(f"Media视频阶段失败：failed_stage=hls_capture，{exc}")
+            return ""
+        finally:
+            try:
+                detail_page.remove_listener("response", on_response)
+            except Exception:
+                pass
+
+    @staticmethod
+    def _normalize_status_url(value: str) -> str:
+        match = re.search(r"https?://(?:www\.)?(?:x|twitter)\.com/[^/]+/status/\d+", value, re.IGNORECASE)
+        return match.group(0) if match else ""
+
+    @staticmethod
+    def _author_from_status_url(value: str) -> str:
+        match = re.search(r"https?://(?:www\.)?(?:x|twitter)\.com/([^/]+)/status/", value, re.IGNORECASE)
+        return match.group(1) if match else ""
+
     def _collect_timeline(
         self,
         page: Page,
@@ -200,7 +646,11 @@ class XCollector(PinterestCollector):
                 break
             stale_rounds = stale_rounds + 1 if len(candidates) == before else 0
             if stale_rounds >= 8:
-                self.log("连续滚动未发现新的 X 图片帖子，结束采集；可能页面暂无更多内容。")
+                media_label = {"image": "图片", "video": "视频", "mixed": "媒体"}.get(media_type, "媒体")
+                self.log(
+                    f"连续滚动未发现新的 X {media_label}候选，停止原因=stagnation；"
+                    f"连续无新增={stale_rounds} 轮，可能页面暂无更多内容。"
+                )
                 break
             page.mouse.wheel(0, 1800)
             page.wait_for_timeout(1200)
@@ -287,7 +737,11 @@ class XCollector(PinterestCollector):
                 .map((img) => [img.currentSrc || '', img.src || '', ...(img.srcset || '').split(',').map(value => value.trim().split(/\s+/)[0])]
                   .find(url => /pbs\.twimg\.com\/media\//i.test(url)) || '')
                 .filter((url) => /pbs\.twimg\.com\/media\//i.test(url));
-              const uniqueMedia = Array.from(new Set(media));
+              const posterUrls = new Set(videos.map(video => video.poster).filter(Boolean));
+              const uniqueMedia = Array.from(new Set(media)).filter(url => (
+                !posterUrls.has(url)
+                && !/(?:ext_tw_video_thumb|amplify_video_thumb)/i.test(url)
+              ));
               return {status, authorUsername, repost, video, videos, promoted, media: uniqueMedia, tweetText, postedAt, statusLinkCount: statusLinks.length};
               })
             }
@@ -364,6 +818,11 @@ class XCollector(PinterestCollector):
                 for video in item.get("videos") or []:
                     playlist = self._playlist_for_video(str(video.get("poster") or ""))
                     if not playlist:
+                        continue
+                    if any(
+                        existing.media_type == "video" and existing.media_url == playlist
+                        for existing in candidates.values()
+                    ):
                         continue
                     identity = self._video_identity(str(video.get("poster") or "")) or playlist
                     key = f"video:{identity}"
@@ -446,6 +905,23 @@ class XCollector(PinterestCollector):
         except Exception as exc:
             self.log(f"X 调试页面保存失败：{exc}")
 
+    def _save_media_debug_snapshot_if_needed(self, page: Page, diagnostics: XMediaGridDiagnostics) -> None:
+        if not self.debug_dir or self._media_debug_saved:
+            return
+        if diagnostics.grid_item_count > 0 and diagnostics.media_candidate_count > 0:
+            return
+        try:
+            self.debug_dir.mkdir(parents=True, exist_ok=True)
+            (self.debug_dir / "debug_x_media.html").write_text(page.content(), encoding="utf-8")
+            try:
+                page.screenshot(path=str(self.debug_dir / "debug_x_media.png"), full_page=True)
+            except Exception as exc:
+                self.log(f"X Media 调试截图保存失败：{exc}")
+            self._media_debug_saved = True
+            self.log(f"X Media 失败诊断快照已保存到：{self.debug_dir}")
+        except Exception as exc:
+            self.log(f"X Media 调试页面保存失败：{exc}")
+
     def _prepare_video_capture(self, page: Page) -> None:
         page_id = id(page)
         if page_id in self._video_pages:
@@ -467,10 +943,14 @@ class XCollector(PinterestCollector):
             playlist_path = parts.path.split("/pl/", 1)[-1]
             if "/" in playlist_path:
                 return
-            identity = self._video_identity(parts.path)
-            self._video_playlists[identity].append(url)
+            self._remember_video_playlist(url)
         except Exception:
             return
+
+    def _remember_video_playlist(self, url: str) -> None:
+        identity = self._video_identity(urlsplit(url).path)
+        if url not in self._video_playlists[identity]:
+            self._video_playlists[identity].append(url)
 
     @staticmethod
     def _video_identity(value: str) -> str:

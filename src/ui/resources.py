@@ -21,4 +21,6 @@ def app_icon_path() -> str:
 
 
 def stylesheet() -> str:
-    return Path(resource_path("styles/app.qss")).read_text(encoding="utf-8")
+    stylesheet_text = Path(resource_path("styles/app.qss")).read_text(encoding="utf-8")
+    chevron = resource_path("icons/chevron-down.svg").replace("\\", "/")
+    return stylesheet_text.replace("CHEVRON_DOWN_PATH", chevron)

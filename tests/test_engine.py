@@ -5,7 +5,9 @@ from PIL import Image
 from src.browser import ImageCandidate
 from src.downloader import engine as engine_module
 from src.downloader.engine import DownloadEngine
+from src.downloader.hls import HLSDownloadError
 from src.models import TaskConfig
+from src.storage import CollectorDatabase, TaskStore
 
 
 def _image_bytes(size: tuple[int, int], color: str) -> bytes:
@@ -74,7 +76,7 @@ def test_download_count_means_successful_images_not_discovered_candidates(tmp_pa
     monkeypatch.setattr(engine_module, "PinterestCollector", Collector)
     config = TaskConfig("test", 2, tmp_path, min_width=2, min_height=2, interval_seconds=0)
 
-    task_dir = DownloadEngine(config, tmp_path / "profile").run()
+    task_dir = DownloadEngine(config, tmp_path / "profile", database=CollectorDatabase(tmp_path / "collector.db")).run()
 
     assert len(list((task_dir / "images").iterdir())) == 2
     assert (task_dir / "task.json").read_text(encoding="utf-8").find('"downloaded": 2') >= 0
@@ -99,7 +101,7 @@ def test_engine_reports_task_directory_as_soon_as_it_is_created(tmp_path: Path, 
     started: list[Path] = []
 
     try:
-        DownloadEngine(config, tmp_path / "profile", on_task_dir=started.append).run()
+        DownloadEngine(config, tmp_path / "profile", on_task_dir=started.append, database=CollectorDatabase(tmp_path / "collector.db")).run()
     except RuntimeError:
         pass
 
@@ -107,3 +109,90 @@ def test_engine_reports_task_directory_as_soon_as_it_is_created(tmp_path: Path, 
     assert started[0].name.startswith("test_")
     assert started[0].parent == tmp_path
     assert config.output_root == tmp_path
+
+
+def test_engine_reuses_managed_browser_and_records_current_page_url(tmp_path: Path, monkeypatch) -> None:
+    observed: dict[str, bool] = {}
+
+    class Page:
+        url = "https://www.pinterest.com/pin/123/"
+
+    class Collector:
+        page = Page()
+        opened = False
+        connected = False
+
+        def __init__(self, profile_dir, log) -> None:
+            return None
+
+        def open(self) -> None:
+            observed["opened"] = True
+
+        def connect_over_cdp(self, endpoint: str) -> None:
+            observed["connected"] = endpoint == "http://127.0.0.1:9222"
+
+        def prepare_current_page(self):
+            return self.page
+
+        def collect_current_page(self, *args, **kwargs):
+            return []
+
+        def close(self) -> None:
+            return None
+
+    class Manager:
+        endpoint = "http://127.0.0.1:9222"
+
+        def is_running(self) -> bool:
+            return True
+
+    monkeypatch.setattr(engine_module, "PinterestCollector", Collector)
+    config = TaskConfig("", 1, tmp_path, collection_mode="current_page", interval_seconds=0)
+
+    task_dir = DownloadEngine(config, tmp_path / "profile", database=CollectorDatabase(tmp_path / "collector.db"), browser_manager=Manager()).run()
+
+    assert observed == {"connected": True}
+    task_data = (task_dir / "task.json").read_text(encoding="utf-8")
+    assert '"source_page_url": "https://www.pinterest.com/pin/123/"' in task_data
+
+
+def test_video_download_error_only_fails_current_candidate(tmp_path: Path, monkeypatch) -> None:
+    config = TaskConfig(
+        "",
+        2,
+        tmp_path / "output",
+        platform="x",
+        source_identifier="example",
+        collection_mode="home",
+        media_type="video",
+        interval_seconds=0,
+    )
+    engine = DownloadEngine(
+        config,
+        tmp_path / "profile",
+        database=CollectorDatabase(tmp_path / "collector.db"),
+    )
+    engine.task_dir = tmp_path / "task"
+    engine.task_dir.mkdir()
+    store = TaskStore(engine.task_dir, config)
+    calls = 0
+
+    def fake_download_video(_client, _candidate, _record, _store, _known) -> None:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise HLSDownloadError("timeout")
+        engine.stats.downloaded += 1
+
+    monkeypatch.setattr(engine, "_download_video", fake_download_video)
+    candidates = [
+        ImageCandidate("", "https://x.com/example/status/1", media_type="video", media_url="video-1"),
+        ImageCandidate("", "https://x.com/example/status/2", media_type="video", media_url="video-2"),
+    ]
+
+    for candidate in candidates:
+        engine._download_one(object(), candidate, store, set())
+
+    assert calls == 2
+    assert engine.stats.failed == 1
+    assert engine.stats.downloaded == 1

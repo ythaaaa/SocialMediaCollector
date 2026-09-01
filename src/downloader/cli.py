@@ -13,6 +13,7 @@ def main() -> None:
     parser.add_argument("--platform", choices=("pinterest", "x"), default="pinterest")
     parser.add_argument("--mode", choices=("search", "home", "current_page", "author"), default="search")
     parser.add_argument("--media-type", choices=("image", "video", "mixed"), default="image")
+    parser.add_argument("--search-scope", choices=("media", "top"), default="media")
     parser.add_argument("--count", type=int, default=20)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--min-width", type=int, default=800)
@@ -30,6 +31,7 @@ def main() -> None:
         source_identifier=args.keyword if args.platform == "x" else "",
         collection_mode=args.mode,
         media_type=args.media_type if args.platform == "x" else "image",
+        search_scope=args.search_scope if args.platform == "x" and args.mode == "search" else "media",
     )
     engine = DownloadEngine(config, browser_profile_directory(), print)
     task_dir = engine.run()
