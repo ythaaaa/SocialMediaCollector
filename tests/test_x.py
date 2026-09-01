@@ -104,3 +104,144 @@ def test_x_collector_can_emit_video_playlist_candidates() -> None:
     assert candidate.media_type == "video"
     assert candidate.media_url.endswith("master.m3u8")
     assert candidate.video_width == 720
+
+
+def test_x_author_username_from_dom_link_is_case_insensitive_and_ignores_display_name() -> None:
+    class Locator:
+        def evaluate_all(self, script):
+            return [{
+                "status": "https://x.com/AIVideoHub_/status/1",
+                "authorUsername": "AIVideoHub_",
+                "authorName": "AIVideoHub 🕊️",
+                "repost": False,
+                "video": False,
+                "media": ["https://pbs.twimg.com/media/one.jpg?name=small"],
+            }]
+
+    class Page:
+        url = "https://x.com/AIVideoHub_"
+
+        def locator(self, selector):
+            assert "article" in selector
+            return Locator()
+
+    candidates: dict[str, ImageCandidate] = {}
+    collector = XCollector(Path("profile"), lambda _: None)
+    diagnostics = collector._collect_visible_tweets(Page(), "aivideohub_", Page.url, True, candidates, None)
+
+    assert len(candidates) == 1
+    assert diagnostics.author_match_count == 1
+    assert diagnostics.author_mismatch_count == 0
+
+
+def test_x_missing_tweet_text_does_not_block_normal_image_collection() -> None:
+    class Locator:
+        def evaluate_all(self, script):
+            return [{
+                "status": "https://x.com/example/status/1",
+                "authorUsername": "example",
+                "repost": False,
+                "video": False,
+                "media": ["https://pbs.twimg.com/media/one.jpg?name=small"],
+            }]
+
+    class Page:
+        url = "https://x.com/example"
+
+        def locator(self, selector):
+            return Locator()
+
+    candidates: dict[str, ImageCandidate] = {}
+    diagnostics = XCollector(Path("profile"), lambda _: None)._collect_visible_tweets(
+        Page(), "example", Page.url, True, candidates, None
+    )
+
+    assert len(candidates) == 1
+    assert diagnostics.tweet_text_count == 0
+    assert diagnostics.media_candidate_count == 1
+
+
+def test_x_author_mismatch_is_diagnosed_and_filtered() -> None:
+    class Locator:
+        def evaluate_all(self, script):
+            return [{
+                "status": "https://x.com/other/status/1",
+                "authorUsername": "other",
+                "repost": False,
+                "video": False,
+                "media": ["https://pbs.twimg.com/media/other.jpg?name=small"],
+            }]
+
+    class Page:
+        url = "https://x.com/example"
+
+        def locator(self, selector):
+            return Locator()
+
+    candidates: dict[str, ImageCandidate] = {}
+    collector = XCollector(Path("profile"), lambda _: None)
+    diagnostics = collector._collect_visible_tweets(Page(), "example", Page.url, True, candidates, None)
+
+    assert candidates == {}
+    assert diagnostics.raw_media_count == 1
+    assert diagnostics.author_match_count == 0
+    assert diagnostics.author_mismatch_count == 1
+    assert collector._empty_result_message("example", True, False) == "已检测到媒体，但作者匹配过滤后无候选，请检查作者识别逻辑。"
+
+
+def test_x_missing_author_is_conservative_and_does_not_raise() -> None:
+    class Locator:
+        def evaluate_all(self, script):
+            return [{
+                "status": "https://x.com/example/status/1",
+                "repost": False,
+                "video": False,
+                "media": ["https://pbs.twimg.com/media/one.jpg?name=small"],
+            }]
+
+    class Page:
+        url = "https://x.com/example"
+
+        def locator(self, selector):
+            return Locator()
+
+    candidates: dict[str, ImageCandidate] = {}
+    diagnostics = XCollector(Path("profile"), lambda _: None)._collect_visible_tweets(
+        Page(), "example", Page.url, True, candidates, None
+    )
+
+    assert len(candidates) == 1
+    assert diagnostics.author_unknown_count == 1
+
+
+def test_x_empty_result_messages_distinguish_dom_media_and_prompt_failures() -> None:
+    collector = XCollector(Path("profile"), lambda _: None)
+    collector.last_scan_diagnostics.article_count = 0
+    assert "未检测到帖子" in collector._empty_result_message("example", True, False)
+    collector.last_scan_diagnostics.article_count = 2
+    collector.last_scan_diagnostics.image_node_count = 0
+    collector.last_scan_diagnostics.video_node_count = 0
+    assert "未识别到符合条件的图片/视频" in collector._empty_result_message("example", True, False)
+    collector.last_scan_diagnostics.image_node_count = 1
+    collector.last_scan_diagnostics.author_mismatch_count = 2
+    assert "作者匹配过滤后无候选" in collector._empty_result_message("example", True, False)
+    collector.last_scan_diagnostics.author_mismatch_count = 0
+    collector.last_scan_diagnostics.prompt_detected_count = 0
+    assert "未发现疑似包含 Prompt" in collector._empty_result_message("example", False, True)
+
+
+def test_x_failed_scan_can_save_minimal_debug_snapshot(tmp_path: Path) -> None:
+    class Page:
+        def content(self):
+            return "<html><body>debug</body></html>"
+
+        def screenshot(self, path, full_page):
+            Path(path).write_bytes(b"png")
+
+    collector = XCollector(Path("profile"), lambda _: None, tmp_path)
+    collector.last_scan_diagnostics.article_count = 1
+    collector.last_scan_diagnostics.media_candidate_count = 0
+    collector._save_debug_snapshot_if_needed(Page())
+
+    assert (tmp_path / "debug_x_page.html").read_text(encoding="utf-8") == "<html><body>debug</body></html>"
+    assert (tmp_path / "debug_x_page.png").read_bytes() == b"png"

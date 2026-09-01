@@ -15,7 +15,8 @@ class TaskStore:
         "image_format", "downloaded_at", "content_hash", "status", "reason",
         "collection_mode", "source_page_url", "platform", "author_username", "post_url",
         "only_author_content", "media_type", "media_url", "duration", "video_width",
-        "video_height", "bitrate",
+        "video_height", "bitrate", "post_id", "post_text", "prompt_detected", "prompt",
+        "posted_at", "collected_at",
     ]
 
     def __init__(self, task_dir: Path, config: TaskConfig) -> None:
@@ -33,6 +34,7 @@ class TaskStore:
         data["download_interval"] = config.download_interval
         data["save_dir"] = str(config.save_dir)
         data["only_author_posts"] = config.only_author_posts
+        data["only_prompt_posts"] = config.only_prompt_posts
         data["platform"] = config.canonical_platform()
         data["collection_mode"] = config.canonical_collection_mode()
         data["media_type"] = config.canonical_media_type()

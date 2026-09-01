@@ -12,6 +12,7 @@ from src.tasks import QueueTask
 
 class QueueRunner(QThread):
     task_status = Signal(str, str, str)
+    task_started = Signal(str)
     stats = Signal(object)
     log = Signal(str)
     finished_queue = Signal()
@@ -71,6 +72,10 @@ class QueueRunner(QThread):
                 self.current_task = task
                 try:
                     self.current_engine = DownloadEngine(task.config, self.profile_dir, self.log.emit, self.stats.emit)
+                    # Attach the callback after construction so lightweight
+                    # fake engines used by tests and future integrations keep
+                    # the original four-argument constructor contract.
+                    self.current_engine.on_task_dir = lambda path: self.task_started.emit(str(path))
                     self.current_engine.run()
                     if self._stop_requested.is_set():
                         self._set_status(task, "stopped")

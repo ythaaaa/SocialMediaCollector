@@ -19,13 +19,22 @@ from src.utils.paths import create_task_directory
 
 
 class DownloadEngine:
-    def __init__(self, config: TaskConfig, profile_dir: Path, on_log: Callable[[str], None] = print, on_stats: Callable[[TaskStats], None] = lambda _: None) -> None:
+    def __init__(
+        self,
+        config: TaskConfig,
+        profile_dir: Path,
+        on_log: Callable[[str], None] = print,
+        on_stats: Callable[[TaskStats], None] = lambda _: None,
+        on_task_dir: Callable[[Path], None] | None = None,
+    ) -> None:
         config.validate()
         self.config, self.profile_dir, self.on_log, self.on_stats = config, profile_dir, on_log, on_stats
+        self.on_task_dir = on_task_dir
         self.pause_event, self.stop_event = Event(), Event()
         self.pause_event.set()
         self.stats = TaskStats()
         self.task_dir: Path | None = None
+        self.task_output_dir: Path | None = None
 
     def pause(self) -> None: self.pause_event.clear()
     def resume(self) -> None: self.pause_event.set()
@@ -51,9 +60,14 @@ class DownloadEngine:
                 "home": "首页推荐流",
                 "current_page": "当前页面",
             }[mode]
-        self.task_dir = create_task_directory(self.config.output_root, task_name)
-        store = TaskStore(self.task_dir, self.config)
-        collector = XCollector(self.profile_dir, self.on_log) if platform == "x" else PinterestCollector(self.profile_dir, self.on_log)
+        # ``config.output_root`` is always the user-selected save root. The
+        # generated task directory is a separate runtime-only value.
+        self.task_output_dir = create_task_directory(self.config.output_root, task_name)
+        self.task_dir = self.task_output_dir
+        if self.on_task_dir:
+            self.on_task_dir(self.task_output_dir)
+        store = TaskStore(self.task_output_dir, self.config)
+        collector = XCollector(self.profile_dir, self.on_log, self.task_output_dir) if platform == "x" else PinterestCollector(self.profile_dir, self.on_log)
         try:
             self._emit("正在打开浏览器并收集图片")
             collector.open()
@@ -62,9 +76,9 @@ class DownloadEngine:
                 on_candidate = lambda candidate: self._process_candidate(client, candidate, store, known)
                 should_finish = lambda: self.stats.downloaded >= self.config.target_count
                 if platform == "x" and mode == "author":
-                    candidates = collector.collect_author(self.config.canonical_source_value, self.config.target_count, self.config.max_scrolls, self.config.only_author_content, self.stop_event.is_set, self._wait_if_paused, self._on_found, on_candidate, should_finish, self.config.canonical_media_type())
+                    candidates = collector.collect_author(self.config.canonical_source_value, self.config.target_count, self.config.max_scrolls, self.config.only_author_content, self.stop_event.is_set, self._wait_if_paused, self._on_found, on_candidate, should_finish, self.config.canonical_media_type(), self.config.only_prompt_posts)
                 elif platform == "x":
-                    candidates = collector.collect_home(self.config.target_count, self.config.max_scrolls, self.stop_event.is_set, self._wait_if_paused, self._on_found, on_candidate, should_finish, self.config.canonical_media_type())
+                    candidates = collector.collect_home(self.config.target_count, self.config.max_scrolls, self.stop_event.is_set, self._wait_if_paused, self._on_found, on_candidate, should_finish, self.config.canonical_media_type(), self.config.only_prompt_posts)
                 elif mode == "search":
                     candidates = collector.collect(self.config.keyword, self.config.target_count, self.config.max_scrolls, self.stop_event.is_set, self._wait_if_paused, self._on_found, on_candidate, should_finish)
                 elif mode == "home":
@@ -131,6 +145,12 @@ class DownloadEngine:
             duration=candidate.duration,
             video_width=candidate.video_width,
             video_height=candidate.video_height,
+            post_id=candidate.post_id,
+            post_text=candidate.post_text,
+            prompt_detected=candidate.prompt_detected,
+            prompt=candidate.prompt,
+            posted_at=candidate.posted_at,
+            collected_at=datetime.now().isoformat(timespec="seconds"),
         )
         try:
             if candidate.media_type == "video":

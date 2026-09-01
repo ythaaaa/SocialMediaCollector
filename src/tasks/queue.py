@@ -5,7 +5,6 @@ from pathlib import Path
 from uuid import uuid4
 
 from src.models import TASK_STATUSES, TaskConfig
-from src.utils.paths import safe_folder_name
 from src.utils.x import normalize_x_author
 
 
@@ -67,7 +66,6 @@ def build_batch_configs(base_config: TaskConfig, text: str) -> list[TaskConfig]:
     platform = base_config.canonical_platform()
     mode = base_config.canonical_collection_mode()
     sources = parse_batch_sources(platform, mode, text)
-    group = "Pinterest" if platform == "pinterest" else "X"
     configs: list[TaskConfig] = []
     for source in sources:
         configs.append(
@@ -77,7 +75,9 @@ def build_batch_configs(base_config: TaskConfig, text: str) -> list[TaskConfig]:
                 status="pending",
                 keyword=source if platform == "pinterest" else "",
                 source_identifier=source if platform == "x" and mode == "author" else "",
-                output_root=base_config.output_root / group / safe_folder_name(source),
+                # Keep the user's selected directory as the immutable save root.
+                # The engine creates the per-task output directory at runtime.
+                output_root=base_config.output_root,
             )
         )
     return configs

@@ -7,7 +7,7 @@ import sys
 import time
 from pathlib import Path
 
-from PySide6.QtCore import Qt, QThread, Signal, QTimer
+from PySide6.QtCore import QSettings, Qt, QThread, Signal, QTimer
 from PySide6.QtGui import QCloseEvent, QIcon, QTextCursor
 from PySide6.QtWidgets import (
     QApplication, QCheckBox, QComboBox, QDoubleSpinBox, QFileDialog, QFormLayout, QFrame, QGridLayout,
@@ -30,12 +30,13 @@ from src.version import APP_VERSION
 class Worker(QThread):
     log = Signal(str)
     stats = Signal(object)
+    task_started = Signal(str)
     done = Signal(str)
     failed = Signal(str)
 
     def __init__(self, config: TaskConfig, profile_dir: Path) -> None:
         super().__init__()
-        self.engine = DownloadEngine(config, profile_dir, self.log.emit, self.stats.emit)
+        self.engine = DownloadEngine(config, profile_dir, self.log.emit, self.stats.emit, lambda path: self.task_started.emit(str(path)))
 
     def run(self) -> None:
         try:
@@ -113,6 +114,7 @@ class MainWindow(QMainWindow):
         self.worker: Worker | None = None
         self.login_worker: ChromeLoginWorker | None = None
         self.last_task_dir: Path | None = None
+        self.settings = QSettings("PinterestLocalDownloader", "SocialMediaCollector")
         self._input_state = ModeInputState()
         self.queue_store = QueueStore()
         self.queue_tasks: list[QueueTask] = []
@@ -153,6 +155,8 @@ class MainWindow(QMainWindow):
         self.mode_hint.setWordWrap(True)
         self.only_author = QCheckBox("仅采集作者本人内容")
         self.only_author.setChecked(True)
+        self.only_prompt = QCheckBox("仅采集疑似包含 Prompt 的帖子")
+        self.only_prompt.setChecked(False)
 
         self.count = self._spin_box(1, 10000, 100)
         self.min_width = self._spin_box(1, 10000, 800)
@@ -164,8 +168,11 @@ class MainWindow(QMainWindow):
         self.interval.setSuffix(" 秒")
         self.interval.setMinimumHeight(36)
 
-        self.output = QLineEdit(str(Path.home() / "Pinterest素材"))
+        default_save_root = str(Path.home() / "Pinterest素材")
+        saved_save_root = str(self.settings.value("save_root", "") or "").strip()
+        self.output = QLineEdit(saved_save_root or default_save_root)
         self.output.setMinimumHeight(38)
+        self.output.textChanged.connect(self._remember_save_root)
         self.choose = QPushButton("选择目录")
         self.choose.setIcon(QIcon(resource_path("icons/folder.svg")))
 
@@ -261,6 +268,7 @@ class MainWindow(QMainWindow):
         layout.addWidget(self.add_queue)
         layout.addWidget(self.mode_hint)
         layout.addWidget(self.only_author)
+        layout.addWidget(self.only_prompt)
         numbers = QGridLayout()
         numbers.setHorizontalSpacing(12)
         for column, (label, control) in enumerate((
@@ -425,6 +433,8 @@ class MainWindow(QMainWindow):
             self.mode_hint.setText("从该 X 作者主页向下采集图片内容。" if author_mode else "从 X 首页‘为你推荐’内容流向下采集。")
             self.only_author.setVisible(author_mode)
             self.only_author.setEnabled(author_mode)
+            self.only_prompt.setVisible(True)
+            self.only_prompt.setEnabled(True)
             self.media_type_label.setVisible(True)
             self.media_type.setVisible(True)
             self._update_batch_controls()
@@ -441,6 +451,7 @@ class MainWindow(QMainWindow):
             "current_page": "请先在 Pinterest 浏览器中打开目标页面，再点击开始下载；程序不会自动切换页面。",
         }.get(mode, ""))
         self.only_author.setVisible(False)
+        self.only_prompt.setVisible(False)
         self.media_type_label.setVisible(False)
         self.media_type.setVisible(False)
         self._update_batch_controls()
@@ -462,6 +473,7 @@ class MainWindow(QMainWindow):
         self.keyword.setVisible(not batch_enabled)
         self.batch_input.setVisible(batch_enabled)
         self.add_queue.setVisible(batch_enabled)
+        self.start.setEnabled(not running and not batch_enabled)
         self.batch_input.setEnabled(batch_enabled and not running)
         self.add_queue.setEnabled(batch_enabled and not running)
 
@@ -503,7 +515,7 @@ class MainWindow(QMainWindow):
         return TaskConfig(
             keyword=self.keyword.text() if platform == "pinterest" else "",
             target_count=self.count.value(),
-            output_root=Path(self.output.text()),
+            output_root=self._save_root(),
             min_width=self.min_width.value(),
             min_height=self.min_height.value(),
             interval_seconds=self.interval.value(),
@@ -512,7 +524,16 @@ class MainWindow(QMainWindow):
             source_identifier=self.keyword.text() if platform == "x" and mode == "author" else "",
             only_author_content=self.only_author.isChecked() if mode == "author" else False,
             media_type=str(self.media_type.currentData()) if platform == "x" else "image",
+            only_prompt_posts=self.only_prompt.isChecked() if platform == "x" else False,
         )
+
+    def _save_root(self) -> Path:
+        return Path(self.output.text()).expanduser()
+
+    def _remember_save_root(self, value: str) -> None:
+        if value.strip():
+            self.settings.setValue("save_root", value.strip())
+            self.settings.sync()
 
     def add_batch_tasks(self) -> None:
         try:
@@ -555,6 +576,7 @@ class MainWindow(QMainWindow):
         self.queue_runner = QueueRunner(self.queue_tasks, profile, self.queue_store)
         self.queue_runner.log.connect(self.append_log)
         self.queue_runner.stats.connect(self.update_stats)
+        self.queue_runner.task_started.connect(self.task_started)
         self.queue_runner.task_status.connect(self._queue_task_status)
         self.queue_runner.finished_queue.connect(self._queue_finished)
         self._set_running(True)
@@ -597,6 +619,7 @@ class MainWindow(QMainWindow):
         self.worker = Worker(config, profile)
         self.worker.log.connect(self.append_log)
         self.worker.stats.connect(self.update_stats)
+        self.worker.task_started.connect(self.task_started)
         self.worker.done.connect(self.task_done)
         self.worker.failed.connect(self.task_failed)
         self._set_running(True)
@@ -667,12 +690,17 @@ class MainWindow(QMainWindow):
         self.log.moveCursor(QTextCursor.MoveOperation.End)
 
     def task_done(self, directory: str) -> None:
-        self.last_task_dir = Path(directory)
-        self.current_task.setText(f"当前任务文件夹：{directory}")
+        self.task_started(directory)
         self.open_dir.setProperty("attention", True)
         self._refresh_style(self.open_dir)
         self.append_log(f"任务结束：{directory}")
         self._set_running(False)
+
+    def task_started(self, directory: str) -> None:
+        self.last_task_dir = Path(directory)
+        self.current_task.setText(f"当前任务文件夹：{directory}")
+        self.open_dir.setProperty("attention", False)
+        self._refresh_style(self.open_dir)
 
     def task_failed(self, message: str) -> None:
         self.append_log(f"任务异常：{message}")
@@ -690,6 +718,7 @@ class MainWindow(QMainWindow):
         self.mode.setEnabled(not running)
         self.media_type.setEnabled(not running)
         self.batch_mode.setEnabled(not running)
+        self.only_prompt.setEnabled(not running)
         self.start_queue.setEnabled(not running)
         self.clear_completed.setEnabled(not running)
         if running:

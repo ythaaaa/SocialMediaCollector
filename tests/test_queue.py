@@ -10,7 +10,7 @@ from src.downloader import queue_runner as runner_module
 from src.models import TaskConfig
 from src.storage import QueueStore
 from src.tasks import BatchInputError, QueueTask, build_batch_configs, parse_batch_sources
-from src.utils.paths import safe_folder_name
+from src.utils.paths import create_task_directory, safe_folder_name
 
 
 def _base_config(platform: str = "pinterest", mode: str = "search") -> TaskConfig:
@@ -29,7 +29,8 @@ def test_pinterest_batch_builds_four_tasks_ignores_empty_and_deduplicates() -> N
         "cute 3d character",
     ]
     assert all(config.target_count == 5 for config in configs)
-    assert configs[0].output_root == Path("downloads/Pinterest/AI character design")
+    assert configs[0].output_root == Path("downloads")
+    assert all(config.output_root == Path("downloads") for config in configs)
 
 
 def test_x_batch_normalizes_three_author_formats() -> None:
@@ -38,6 +39,17 @@ def test_x_batch_normalizes_three_author_formats() -> None:
         "AIVideoHub_\n@some_author\nhttps://x.com/example",
     )
     assert [config.canonical_source_value for config in configs] == ["AIVideoHub_", "some_author", "example"]
+
+
+def test_queue_tasks_create_sibling_directories_under_one_save_root(tmp_path: Path) -> None:
+    configs = build_batch_configs(
+        TaskConfig("", 5, tmp_path, platform="pinterest", collection_mode="search", interval_seconds=0),
+        "one\ntwo\nthree",
+    )
+    directories = [create_task_directory(config.output_root, config.keyword) for config in configs]
+
+    assert all(config.output_root == tmp_path for config in configs)
+    assert all(directory.parent == tmp_path for directory in directories)
 
 
 def test_batch_invalid_line_reports_line_number() -> None:

@@ -48,6 +48,7 @@ class TaskConfig:
     author_username: str = ""
     only_author_content: bool = True
     media_type: str = "image"
+    only_prompt_posts: bool = False
     # V2 queue fields. Legacy fields above remain the source of truth for V1.
     task_id: str = field(default_factory=lambda: uuid4().hex)
     status: str = "pending"
@@ -129,6 +130,7 @@ class TaskConfig:
             author_username=str(data.get("author_username") or ""),
             only_author_content=bool(data.get("only_author_content", data.get("only_author_posts", True))),
             media_type=str(data.get("media_type") or "image"),
+            only_prompt_posts=bool(data.get("only_prompt_posts", False)),
             task_id=str(data.get("task_id") or uuid4().hex),
             status=str(data.get("status") or "pending"),
         )
@@ -187,6 +189,12 @@ class DownloadRecord:
     video_width: int | None = None
     video_height: int | None = None
     bitrate: int | None = None
+    post_id: str = ""
+    post_text: str = ""
+    prompt_detected: bool = False
+    prompt: str = ""
+    posted_at: str = ""
+    collected_at: str = ""
 
     def row(self) -> dict[str, Any]:
         return asdict(self)

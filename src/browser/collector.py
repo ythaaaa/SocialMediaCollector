@@ -28,6 +28,11 @@ class ImageCandidate:
     video_width: int | None = None
     video_height: int | None = None
     bitrate: int | None = None
+    post_id: str = ""
+    post_text: str = ""
+    prompt_detected: bool = False
+    prompt: str = ""
+    posted_at: str = ""
 
 
 class PinterestCollector(BrowserSession):

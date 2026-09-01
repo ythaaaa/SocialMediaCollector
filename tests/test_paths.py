@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from src.utils.paths import safe_folder_name
+from src.utils.paths import create_task_directory, safe_folder_name
 from src.models import TaskConfig
 
 
@@ -18,3 +18,12 @@ def test_collection_mode_is_backward_compatible() -> None:
     TaskConfig(**base, collection_mode="current_page").validate()
     legacy = TaskConfig.from_dict({"keyword": "old", "target_count": 1, "output_root": "out"})
     assert legacy.canonical_collection_mode() == "search"
+
+
+def test_consecutive_task_directories_are_siblings_under_save_root(tmp_path: Path) -> None:
+    first = create_task_directory(tmp_path, "x_A")
+    second = create_task_directory(tmp_path, "x_B")
+
+    assert first.parent == tmp_path
+    assert second.parent == tmp_path
+    assert first != second

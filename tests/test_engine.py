@@ -78,3 +78,32 @@ def test_download_count_means_successful_images_not_discovered_candidates(tmp_pa
 
     assert len(list((task_dir / "images").iterdir())) == 2
     assert (task_dir / "task.json").read_text(encoding="utf-8").find('"downloaded": 2') >= 0
+
+
+def test_engine_reports_task_directory_as_soon_as_it_is_created(tmp_path: Path, monkeypatch) -> None:
+    class Collector:
+        def __init__(self, profile_dir, log) -> None:
+            return None
+
+        def open(self) -> None:
+            return None
+
+        def close(self) -> None:
+            return None
+
+        def collect(self, keyword, wanted, max_scrolls, should_stop, should_pause, on_found, on_candidate, should_finish):
+            return []
+
+    monkeypatch.setattr(engine_module, "PinterestCollector", Collector)
+    config = TaskConfig("test", 1, tmp_path, interval_seconds=0)
+    started: list[Path] = []
+
+    try:
+        DownloadEngine(config, tmp_path / "profile", on_task_dir=started.append).run()
+    except RuntimeError:
+        pass
+
+    assert len(started) == 1
+    assert started[0].name.startswith("test_")
+    assert started[0].parent == tmp_path
+    assert config.output_root == tmp_path
