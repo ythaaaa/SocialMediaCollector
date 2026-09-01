@@ -307,6 +307,9 @@ def test_x_media_video_listener_is_registered_before_navigation_and_is_cleaned_u
             events.append("new_page")
             return DetailPage()
 
+        def close(self):
+            pass
+
     collector = XCollector(Path("profile"), lambda _: None)
     collector._context = Context()
     playlist = collector._resolve_media_video_playlist(
@@ -314,10 +317,70 @@ def test_x_media_video_listener_is_registered_before_navigation_and_is_cleaned_u
     )
 
     assert playlist.endswith("master.m3u8")
+    collector.close()
     assert events == ["new_page", "on:response", "goto", "remove:response", "close"]
 
 
-def test_x_media_video_hls_timeout_closes_auxiliary_page(monkeypatch) -> None:
+def test_x_media_video_reuses_one_worker_page_and_closes_it_at_task_end() -> None:
+    events: list[str] = []
+
+    class Response:
+        def __init__(self, video_id: str) -> None:
+            self.url = f"https://video.twimg.com/amplify_video/{video_id}/pl/master.m3u8"
+
+    class Locator:
+        def evaluate_all(self, _script):
+            return None
+
+    class DetailPage:
+        def on(self, event, callback):
+            events.append(f"on:{event}")
+            self.callback = callback
+
+        def goto(self, url, **_kwargs):
+            events.append(f"goto:{url.rsplit('/', 1)[-1]}")
+            self.callback(Response(url.rsplit("/", 2)[-2]))
+
+        def locator(self, _selector):
+            return Locator()
+
+        def wait_for_timeout(self, _milliseconds):
+            pass
+
+        def remove_listener(self, event, _callback):
+            events.append(f"remove:{event}")
+
+        def close(self):
+            events.append("close")
+
+    class Context:
+        def __init__(self) -> None:
+            self.page = DetailPage()
+
+        def new_page(self):
+            events.append("new_page")
+            return self.page
+
+        def close(self):
+            pass
+
+    collector = XCollector(Path("profile"), lambda _: None)
+    collector._context = Context()
+    first = collector._resolve_media_video_playlist(
+        object(), "https://x.com/example/status/123", "https://video.twimg.com/amplify_video_thumb/123/poster.jpg"
+    )
+    second = collector._resolve_media_video_playlist(
+        object(), "https://x.com/example/status/456", "https://video.twimg.com/amplify_video_thumb/456/poster.jpg"
+    )
+
+    assert first.endswith("master.m3u8")
+    assert second.endswith("master.m3u8")
+    assert events.count("new_page") == 1
+    collector.close()
+    assert events.count("close") == 1
+
+
+def test_x_media_video_hls_timeout_closes_worker_page_at_task_end(monkeypatch) -> None:
     events: list[str] = []
 
     class Locator:
@@ -347,6 +410,9 @@ def test_x_media_video_hls_timeout_closes_auxiliary_page(monkeypatch) -> None:
         def new_page(self):
             return DetailPage()
 
+        def close(self):
+            pass
+
     ticks = iter((0.0, 21.0))
     monkeypatch.setattr(x_collector_module.time, "monotonic", lambda: next(ticks))
     collector = XCollector(Path("profile"), lambda _: None)
@@ -355,6 +421,7 @@ def test_x_media_video_hls_timeout_closes_auxiliary_page(monkeypatch) -> None:
     assert collector._resolve_media_video_playlist(
         object(), "https://x.com/example/status/123", "https://video.twimg.com/amplify_video_thumb/123/poster.jpg"
     ) == ""
+    collector.close()
     assert events == ["remove", "close"]
 
 

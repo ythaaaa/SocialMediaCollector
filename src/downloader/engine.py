@@ -284,6 +284,8 @@ class DownloadEngine:
                 self.stop_event.is_set,
                 self._wait_if_paused,
             ).download(candidate.media_url or candidate.image_url, part_path)
+            if self.stop_event.is_set():
+                raise HLSDownloadCancelled()
             digest = self._file_hash(part_path)
             if digest in known or self.database.find_hash_duplicate(digest, part_path):
                 self.stats.duplicate_count += 1
@@ -292,7 +294,13 @@ class DownloadEngine:
                 if self.stats.duplicate_count == 1 or self.stats.duplicate_count % 10 == 0:
                     self.on_log(f"已跳过历史重复素材：{self.stats.duplicate_count} 个")
                 return
+            if self.stop_event.is_set():
+                raise HLSDownloadCancelled()
             part_path.replace(final_path)
+            if self.stop_event.is_set():
+                if final_path.exists():
+                    final_path.unlink()
+                raise HLSDownloadCancelled()
             record.filename = f"videos/{basename}"
             record.file_size = final_path.stat().st_size
             record.image_format = "MP4"

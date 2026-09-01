@@ -10,7 +10,7 @@ from typing import Callable
 from urllib.parse import urljoin
 
 import httpx
-from src.utils.runtime import find_ffmpeg
+from src.utils.runtime import find_ffmpeg, subprocess_creation_flags
 
 
 class HLSDownloadError(RuntimeError):
@@ -127,20 +127,50 @@ class HLSDownloader:
                 ffmpeg_timeout = self._MEDIA_DOWNLOAD_TIMEOUT_SECONDS
                 if self._deadline is not None:
                     ffmpeg_timeout = max(1.0, self._deadline - time.monotonic())
+                process = None
                 try:
-                    result = subprocess.run(
+                    process = subprocess.Popen(
                         command,
-                        capture_output=True,
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.PIPE,
                         text=True,
-                        timeout=ffmpeg_timeout,
+                        creationflags=subprocess_creation_flags(),
                     )
+                    deadline = time.monotonic() + ffmpeg_timeout
+                    while True:
+                        if self.should_stop():
+                            self._terminate_process(process)
+                            raise HLSDownloadCancelled()
+                        remaining = deadline - time.monotonic()
+                        if remaining <= 0:
+                            self._terminate_process(process)
+                            raise HLSDownloadError("X 视频 HLS 下载超时，已跳过当前候选。")
+                        try:
+                            process.communicate(timeout=min(0.2, remaining))
+                            break
+                        except subprocess.TimeoutExpired:
+                            continue
                 except subprocess.SubprocessError as exc:
                     raise HLSDownloadError("FFmpeg 执行失败。") from exc
-                if result.returncode != 0 or not output_path.exists() or output_path.stat().st_size < 1024:
+                finally:
+                    if process is not None and process.poll() is None:
+                        self._terminate_process(process)
+                if process.returncode != 0 or not output_path.exists() or output_path.stat().st_size < 1024:
                     raise HLSDownloadError("FFmpeg 无法封装 X HLS 视频。")
             return HLSResult(duration=duration, width=width, height=height, bitrate=bitrate)
         finally:
             self._deadline = None
+
+    @staticmethod
+    def _terminate_process(process: subprocess.Popen) -> None:
+        if process.poll() is not None:
+            return
+        process.terminate()
+        try:
+            process.wait(timeout=2)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.wait()
 
     def _get_text(self, url: str) -> str:
         response = self._get(url)

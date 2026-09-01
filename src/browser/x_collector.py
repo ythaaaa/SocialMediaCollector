@@ -149,6 +149,30 @@ class XCollector(PinterestCollector):
         self._media_video_attempted: set[str] = set()
         self._media_video_skipped: set[str] = set()
         self._media_post_text_cache: dict[str, str] = {}
+        self._media_worker_page: Page | None = None
+
+    def close(self) -> None:
+        worker_page = self._media_worker_page
+        self._media_worker_page = None
+        if worker_page:
+            try:
+                worker_page.close()
+            except Exception:
+                pass
+        super().close()
+
+    def _get_media_worker_page(self) -> tuple[Page | None, bool]:
+        if not self._context:
+            return None, False
+        if self._media_worker_page is not None:
+            is_closed = getattr(self._media_worker_page, "is_closed", None)
+            try:
+                if not callable(is_closed) or not is_closed():
+                    return self._media_worker_page, False
+            except Exception:
+                return self._media_worker_page, False
+        self._media_worker_page = self._context.new_page()
+        return self._media_worker_page, True
 
     def collect_author(
         self,
@@ -305,7 +329,15 @@ class XCollector(PinterestCollector):
         while time.monotonic() < deadline and not should_stop():
             should_pause()
             diagnostics = self._collect_visible_media_grid(
-                page, source_url, candidates, on_candidate, media_type, only_prompt_posts, should_skip_candidate, finish
+                page,
+                source_url,
+                candidates,
+                on_candidate,
+                media_type,
+                only_prompt_posts,
+                should_skip_candidate,
+                finish,
+                should_stop,
             )
             on_found(len(candidates))
             if candidates or finish():
@@ -326,7 +358,15 @@ class XCollector(PinterestCollector):
             should_pause()
             before = len(candidates) + len(self._media_video_skipped)
             diagnostics = self._collect_visible_media_grid(
-                page, source_url, candidates, on_candidate, media_type, only_prompt_posts, should_skip_candidate, finish
+                page,
+                source_url,
+                candidates,
+                on_candidate,
+                media_type,
+                only_prompt_posts,
+                should_skip_candidate,
+                finish,
+                should_stop,
             )
             on_found(len(candidates))
             if finish():
@@ -350,6 +390,7 @@ class XCollector(PinterestCollector):
         only_prompt_posts: bool = False,
         should_skip_candidate: Callable[[ImageCandidate], bool] | None = None,
         should_finish: Callable[[], bool] | None = None,
+        should_stop: Callable[[], bool] | None = None,
     ) -> XMediaGridDiagnostics:
         payload = page.locator('a[href*="/status/"]').evaluate_all(
             r'''
@@ -374,6 +415,8 @@ class XCollector(PinterestCollector):
         )
         diagnostics = XMediaGridDiagnostics(grid_item_count=len(payload))
         for item in payload:
+            if should_stop and should_stop():
+                break
             if should_finish and should_finish():
                 break
             status_url = self._normalize_status_url(str(item.get("href") or ""))
@@ -492,10 +535,11 @@ class XCollector(PinterestCollector):
             return self._media_post_text_cache[status_url]
         if not self._context:
             return ""
-        detail_page = None
+        detail_page, _created = self._get_media_worker_page()
+        if detail_page is None:
+            return ""
         text = ""
         try:
-            detail_page = self._context.new_page()
             detail_page.goto(status_url, wait_until="domcontentloaded", timeout=60000)
             detail_page.wait_for_timeout(1500)
             texts = detail_page.locator('[data-testid="tweetText"]').all_inner_texts()
@@ -504,11 +548,6 @@ class XCollector(PinterestCollector):
             self.log(f"X 媒体正文解析失败，按无 Prompt 处理：{exc}")
         finally:
             self._media_post_text_cache[status_url] = text
-            if detail_page:
-                try:
-                    detail_page.close()
-                except Exception:
-                    pass
         return text
 
     def _resolve_media_video_playlist(self, page: Page, status_url: str, poster: str) -> str:
@@ -518,23 +557,17 @@ class XCollector(PinterestCollector):
         if status_url in self._media_video_attempted or not self._context:
             return ""
         self._media_video_attempted.add(status_url)
-        detail_page = None
+        detail_page, created = self._get_media_worker_page()
+        if detail_page is None:
+            return ""
         post_id = self._post_id(status_url)
         self.log(f"Media视频候选：post_id={post_id or '-'} status_url={status_url}")
         try:
-            self.log("Media视频阶段=auxiliary_page_created")
-            detail_page = self._context.new_page()
+            self.log("Media视频阶段=worker_page_created" if created else "Media视频阶段=worker_page_reused")
             return self._capture_media_video_playlist(detail_page, status_url, poster)
         except Exception as exc:
             self.log(f"X 媒体视频详情解析失败，failed_stage=page_load，已跳过：{exc}")
             return ""
-        finally:
-            if detail_page:
-                try:
-                    self.log("Media视频阶段=auxiliary_page_closed")
-                    detail_page.close()
-                except Exception:
-                    pass
 
     def _capture_media_video_playlist(self, detail_page: Page, status_url: str, poster: str) -> str:
         """Capture one status page's HLS playlist without sharing listener state."""
