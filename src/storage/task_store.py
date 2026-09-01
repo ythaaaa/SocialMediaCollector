@@ -29,6 +29,10 @@ class TaskStore:
     def _write_task(self, config: TaskConfig) -> None:
         data = asdict(config)
         data["output_root"] = str(config.output_root)
+        data["source_value"] = config.source_value
+        data["download_interval"] = config.download_interval
+        data["save_dir"] = str(config.save_dir)
+        data["only_author_posts"] = config.only_author_posts
         data["platform"] = config.canonical_platform()
         data["collection_mode"] = config.canonical_collection_mode()
         data["media_type"] = config.canonical_media_type()

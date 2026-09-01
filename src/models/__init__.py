@@ -1,3 +1,3 @@
-from .task import DownloadRecord, TaskConfig, TaskStats
+from .task import TASK_STATUSES, DownloadRecord, TaskConfig, TaskStats
 
-__all__ = ["DownloadRecord", "TaskConfig", "TaskStats"]
+__all__ = ["DownloadRecord", "TaskConfig", "TaskStats", "TASK_STATUSES"]

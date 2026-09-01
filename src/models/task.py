@@ -3,8 +3,28 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Mapping
+from uuid import uuid4
 
 from src.utils.x import normalize_x_author
+
+
+TASK_STATUSES = frozenset({"pending", "running", "paused", "completed", "failed", "stopped"})
+
+
+def _looks_like_url(value: str) -> bool:
+    lowered = value.strip().lower()
+    return lowered.startswith(
+        (
+            "http://",
+            "https://",
+            "x.com/",
+            "www.x.com/",
+            "twitter.com/",
+            "www.twitter.com/",
+            "pinterest.com/",
+            "www.pinterest.com/",
+        )
+    )
 
 
 @dataclass(frozen=True)
@@ -28,6 +48,9 @@ class TaskConfig:
     author_username: str = ""
     only_author_content: bool = True
     media_type: str = "image"
+    # V2 queue fields. Legacy fields above remain the source of truth for V1.
+    task_id: str = field(default_factory=lambda: uuid4().hex)
+    status: str = "pending"
 
     def canonical_platform(self) -> str:
         raw = (self.platform or "pinterest").strip().lower()
@@ -48,6 +71,29 @@ class TaskConfig:
     def canonical_author(self) -> tuple[str, str]:
         return normalize_x_author(self.source_identifier or self.author_username or self.keyword)
 
+    @property
+    def source_value(self) -> str:
+        """Unified V2 source field while retaining legacy keyword/source fields."""
+        return self.source_identifier or self.author_username or self.keyword
+
+    @property
+    def canonical_source_value(self) -> str:
+        if self.canonical_platform() == "x" and self.canonical_collection_mode() == "author":
+            return self.canonical_author()[0]
+        return self.source_value.strip()
+
+    @property
+    def download_interval(self) -> float:
+        return self.interval_seconds
+
+    @property
+    def save_dir(self) -> Path:
+        return self.output_root
+
+    @property
+    def only_author_posts(self) -> bool:
+        return self.only_author_content
+
     def canonical_media_type(self) -> str:
         raw = (self.media_type or "image").strip().lower()
         aliases = {
@@ -63,24 +109,28 @@ class TaskConfig:
     @classmethod
     def from_dict(cls, data: Mapping[str, Any]) -> "TaskConfig":
         """Load current and legacy task.json data without requiring new fields."""
+        platform = str(data.get("platform") or "pinterest")
+        source_value = str(data.get("source_value") or "")
         collection_mode = str(data.get("collection_mode") or data.get("mode") or "search")
         return cls(
-            keyword=str(data.get("keyword") or ""),
+            keyword=str(data.get("keyword") or (source_value if platform == "pinterest" else "")),
             target_count=int(data.get("target_count", 0)),
-            output_root=Path(str(data.get("output_root") or ".")),
+            output_root=Path(str(data.get("output_root") or data.get("save_dir") or ".")),
             min_width=int(data.get("min_width", 800)),
             min_height=int(data.get("min_height", 800)),
-            interval_seconds=float(data.get("interval_seconds", 1.0)),
+            interval_seconds=float(data.get("interval_seconds", data.get("download_interval", 1.0))),
             max_scrolls=int(data.get("max_scrolls", 100)),
             retry_count=int(data.get("retry_count", 3)),
             mode=str(data.get("mode") or "keyword_search"),
             collection_mode=collection_mode,
-            platform=str(data.get("platform") or "pinterest"),
-            source_identifier=str(data.get("source_identifier") or ""),
+            platform=platform,
+            source_identifier=str(data.get("source_identifier") or data.get("source_value") or ""),
             source_page_url=str(data.get("source_page_url") or ""),
             author_username=str(data.get("author_username") or ""),
-            only_author_content=bool(data.get("only_author_content", True)),
+            only_author_content=bool(data.get("only_author_content", data.get("only_author_posts", True))),
             media_type=str(data.get("media_type") or "image"),
+            task_id=str(data.get("task_id") or uuid4().hex),
+            status=str(data.get("status") or "pending"),
         )
 
     def validate(self) -> None:
@@ -89,8 +139,13 @@ class TaskConfig:
         supported_modes = {"search", "home", "current_page"} if platform == "pinterest" else {"author", "home"} if platform == "x" else set()
         if not supported_modes or collection_mode not in supported_modes:
             raise ValueError("unsupported collection mode")
-        if platform == "pinterest" and collection_mode == "search" and not self.keyword.strip():
-            raise ValueError("搜索关键词不能为空")
+        if self.status not in TASK_STATUSES:
+            raise ValueError("任务状态无效")
+        if platform == "pinterest" and collection_mode == "search":
+            if not self.keyword.strip():
+                raise ValueError("搜索关键词不能为空")
+            if _looks_like_url(self.keyword):
+                raise ValueError("Pinterest 关键词搜索请输入搜索关键词，不要填写网页地址。")
         if platform == "x":
             if self.canonical_media_type() not in {"image", "video", "mixed"}:
                 raise ValueError("X 下载内容类型无效")

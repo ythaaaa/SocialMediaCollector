@@ -4,6 +4,8 @@ Windows 本地社交媒体图片采集工具。它通过可见的 Pinterest / X 
 
 当前发布版本：`Social Media Collector v1.0.0`
 
+当前内部开发版本：`2.0.0-dev`（V2 Phase 1，尚未创建新的正式发布版本）
+
 平台由 `platform` 字段区分：旧任务缺少该字段时默认按 `pinterest` 解释。
 
 ## 采集模式
@@ -112,6 +114,7 @@ GUI 的“打开浏览器 / 登录”入口会直接启动本机普通 `chrome.e
 * 自动回归：pytest 19 passed；compile/import、PySide6、Playwright、FFmpeg resolver、LGPL 共享 DLL 完整性、GUI 基础启动、隔离 EXE 视频/mixed、`git diff --check` 均 PASS
 * 已知风险：X DOM/selector、动态 Feed、广告节点和 HLS 结构可能变化；平台可能出现登录、验证码和访问频率限制；HLS 加密播放列表暂不支持；视频停止通常在当前 FFmpeg 媒体完成后生效；Pinterest CDN 偶发 403；LGPL 选择不包含 GPL-only 的 libx264/libx265，未来若引入其他 FFmpeg 编码能力需重新审查许可证与运行时依赖
 * Git：Release 固化为本地 commit 和 annotated tag `v1.0.0`；不 push、不创建 GitHub Release；`.venv`、browser-data、Cookie、登录数据、测试媒体和临时 `.part` 不进入 Git
+* V2 Phase 1：内部开发版本 `2.0.0-dev`；GUI 按 `platform + collection_mode` 隔离并恢复输入状态；Pinterest 搜索 URL 输入会被拦截；X 作者输入在进入采集逻辑前统一为 username；现有 `TaskConfig` 扩展了 task_id、source_value、download_interval、save_dir、only_author_posts 和 status 兼容接口，为后续任务队列预留结构
 * 下一步：仅处理必要的发布维护、签名或远程发布策略；不新增采集功能、不迁移 Profile、不内置 FFmpeg 源码
 
 ## v1.0.0 发布内容
@@ -121,6 +124,20 @@ GUI 的“打开浏览器 / 登录”入口会直接启动本机普通 `chrome.e
 * Runtime：Windows PyInstaller onedir EXE、持久化 Chrome Profile、普通 Chrome 人工登录、Playwright 正式采集、bundled FFmpeg LGPL shared。
 * 发布使用：不要求 Python，不要求用户手动安装 FFmpeg；需要本机 Google Chrome，登录状态保存在 `%LOCALAPPDATA%\\PinterestLocalDownloader\\browser-data`。
 * 已知限制：X/Pinterest DOM 未来可能变化；登录、验证码和平台频率限制；Pinterest CDN 偶发 403；加密 HLS 暂不支持；视频停止可能等待当前 FFmpeg 任务完成；当前 Profile 路径保留历史 `PinterestLocalDownloader` 名称。
+
+## Windows Installer Phase
+
+* Installer：Inno Setup `6.7.3`；源文件：`installer/SocialMediaCollector.iss`；构建脚本：`scripts/build_installer.ps1`
+* Installer AppId：`{8FA84253-509A-47BF-8A33-FB2C4357EFC5}`；AppVersion：`1.0.0`；产品名：`Social Media Collector`
+* 安装方式：per-user，无需管理员权限；默认目录：`%LOCALAPPDATA%\\Programs\\SocialMediaCollector`
+* 安装包：`release/SocialMediaCollector-Setup-v1.0.0.exe`；`release/` 仅为本地构建输出，不进入 Git
+* 安装内容：完整 PyInstaller onedir、Qt/Python/Playwright runtime、bundled LGPL FFmpeg、7 个 shared DLL、图标和 `licenses/` 第三方材料；不下载或注册 Chrome/FFmpeg
+* 快捷方式：可选桌面快捷方式；开始菜单包含主程序和卸载入口；快捷方式均指向安装目录
+* 卸载/重装：卸载删除安装目录、快捷方式和卸载注册信息，但保留 `%LOCALAPPDATA%\\PinterestLocalDownloader\\browser-data` 与用户下载目录；覆盖安装不创建第二套应用目录
+* 安装版回归 PASS：Pinterest search/home/current_page 各 3/3；X 作者 3/3；X 图片 3/3；X 视频 2/2；X mixed 3/3；安装目录 bundled FFmpeg 解码 MP4 返回 0
+* 安装版无外部依赖回归：测试进程 PATH 仅为 `C:\\Windows\\System32`，未提供 `D:\\Tools\\FFmpeg`，视频仍由安装目录 LGPL FFmpeg 完成
+* 安装版 Release Gate：自动安装、启动、快捷方式、Installed Apps、卸载、Profile 保留、重装恢复均 PASS；等待用户人工验收
+* 安全状态：Setup 和 App EXE 当前均 unsigned；本机安装/启动测试未观察到 SmartScreen 或 Defender 提示，其他机器可能因未签名而显示系统警告；未配置代码签名证书
 
 ## MVP 范围
 

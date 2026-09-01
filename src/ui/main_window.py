@@ -18,8 +18,10 @@ from PySide6.QtWidgets import (
 from src.downloader import DownloadEngine
 from src.browser.session import BrowserSession, find_chrome_path, regular_chrome_login_command
 from src.models import TaskConfig, TaskStats
+from src.ui.input_state import ModeInputState
 from src.ui.resources import app_icon_path, resource_path, stylesheet
 from src.utils.paths import browser_profile_directory
+from src.version import APP_VERSION
 
 
 class Worker(QThread):
@@ -101,13 +103,14 @@ class StatBlock(QFrame):
 class MainWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
-        self.setWindowTitle("社媒素材采集器")
+        self.setWindowTitle(f"社媒素材采集器 v{APP_VERSION}")
         self.setWindowIcon(QIcon(app_icon_path()))
         self.resize(1080, 800)
         self.setMinimumSize(920, 700)
         self.worker: Worker | None = None
         self.login_worker: ChromeLoginWorker | None = None
         self.last_task_dir: Path | None = None
+        self._input_state = ModeInputState()
 
         self._create_controls()
         self._build_window()
@@ -351,6 +354,7 @@ class MainWindow(QMainWindow):
         self.mode.currentIndexChanged.connect(self._mode_changed)
 
     def _platform_changed(self, _index: int) -> None:
+        self._input_state.remember(self.keyword.text())
         platform = self.platform.currentData()
         self.mode.blockSignals(True)
         self.mode.clear()
@@ -367,6 +371,10 @@ class MainWindow(QMainWindow):
     def _mode_changed(self, _index: int) -> None:
         platform = self.platform.currentData()
         mode = self.mode.currentData()
+        restored_value = self._input_state.switch((platform, mode), self.keyword.text())
+        self.keyword.blockSignals(True)
+        self.keyword.setText(restored_value)
+        self.keyword.blockSignals(False)
         if platform == "x":
             author_mode = mode == "author"
             self.source_label.setText("作者用户名 / 主页地址")
