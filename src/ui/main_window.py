@@ -672,8 +672,8 @@ class MainWindow(QMainWindow):
             )
         self.only_author.setVisible(False)
         self.only_prompt.setVisible(False)
-        self.media_type_label.setVisible(False)
-        self.media_type.setVisible(False)
+        self.media_type_label.setVisible(True)
+        self.media_type.setVisible(True)
         self.search_scope_label.setVisible(False)
         self.search_scope.setVisible(False)
         self._update_batch_controls()
@@ -751,7 +751,7 @@ class MainWindow(QMainWindow):
             platform=platform,
             source_identifier=source_text if platform == "x" and mode in {"author", "search"} else "",
             only_author_content=self.only_author.isChecked() if mode == "author" else False,
-            media_type=str(self.media_type.currentData()) if platform == "x" else "image",
+            media_type=str(self.media_type.currentData()),
             search_scope=str(self.search_scope.currentData()) if platform == "x" and mode == "search" else "media",
             only_prompt_posts=self.only_prompt.isChecked() if platform == "x" else False,
         )

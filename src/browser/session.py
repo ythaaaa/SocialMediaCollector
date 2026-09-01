@@ -121,7 +121,9 @@ class BrowserSession:
         self._connected_over_cdp = False
         if connected:
             if browser:
-                browser.disconnect()
+                # Playwright Python exposes ``close`` for a CDP connection;
+                # it detaches the client without closing the user's Chrome.
+                browser.close()
         elif context:
             context.close()
         if playwright:

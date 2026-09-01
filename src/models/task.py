@@ -163,8 +163,8 @@ class TaskConfig:
                 self.canonical_author()
             elif collection_mode == "search" and not self.source_value.strip():
                 raise ValueError("X 搜索关键词不能为空")
-        elif self.canonical_media_type() != "image":
-            raise ValueError("Pinterest 仅支持图片")
+        elif self.canonical_media_type() not in {"image", "video", "mixed"}:
+            raise ValueError("Pinterest 下载内容类型无效")
         if self.target_count < 1:
             raise ValueError("下载数量必须大于 0")
         if self.min_width < 1 or self.min_height < 1:

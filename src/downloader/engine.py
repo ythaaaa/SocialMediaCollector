@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import io
+import inspect
 import time
 from dataclasses import replace
 from datetime import datetime
@@ -12,7 +13,7 @@ from typing import Callable
 import httpx
 from PIL import Image, UnidentifiedImageError
 
-from src.browser import BrowserSessionManager, ImageCandidate, PinterestCollector, XCollector
+from src.browser import BrowserSessionManager, ImageCandidate, PinterestCollector, PinterestVideoSource, XCollector
 from src.models import DownloadRecord, TaskConfig, TaskStats
 from src.downloader.hls import HLSDownloadCancelled, HLSDownloadError, HLSDownloader
 from src.storage import CollectorDatabase, TaskStore
@@ -121,11 +122,20 @@ class DownloadEngine:
                 elif platform == "x":
                     candidates = collector.collect_home(self.config.target_count, self.config.max_scrolls, self.stop_event.is_set, self._wait_if_paused, self._on_found, on_candidate, should_finish, self.config.canonical_media_type(), self.config.only_prompt_posts)
                 elif mode == "search":
-                    candidates = collector.collect(self.config.keyword, self.config.target_count, self.config.max_scrolls, self.stop_event.is_set, self._wait_if_paused, self._on_found, on_candidate, should_finish)
+                    collect_args = (self.config.keyword, self.config.target_count, self.config.max_scrolls, self.stop_event.is_set, self._wait_if_paused, self._on_found, on_candidate, should_finish)
+                    if "media_type" in inspect.signature(collector.collect).parameters:
+                        collect_args += (self.config.canonical_media_type(),)
+                    candidates = collector.collect(*collect_args)
                 elif mode == "home":
-                    candidates = collector.collect_home(self.config.target_count, self.config.max_scrolls, self.stop_event.is_set, self._wait_if_paused, self._on_found, on_candidate, should_finish)
+                    collect_args = (self.config.target_count, self.config.max_scrolls, self.stop_event.is_set, self._wait_if_paused, self._on_found, on_candidate, should_finish)
+                    if "media_type" in inspect.signature(collector.collect_home).parameters:
+                        collect_args += (self.config.canonical_media_type(),)
+                    candidates = collector.collect_home(*collect_args)
                 else:
-                    candidates = collector.collect_current_page(self.config.target_count, self.config.max_scrolls, self.stop_event.is_set, self._wait_if_paused, self._on_found, on_candidate, should_finish)
+                    collect_args = (self.config.target_count, self.config.max_scrolls, self.stop_event.is_set, self._wait_if_paused, self._on_found, on_candidate, should_finish)
+                    if "media_type" in inspect.signature(collector.collect_current_page).parameters:
+                        collect_args += (self.config.canonical_media_type(),)
+                    candidates = collector.collect_current_page(*collect_args)
             self.on_log(f"收集完成，发现 {len(candidates)} 个候选资源。")
             self.on_log(
                 f"下载统计：成功保存 {self.stats.downloaded}/{self.config.target_count}，"
@@ -288,15 +298,48 @@ class DownloadEngine:
         basename = f"{self.stats.downloaded + 1:04d}.mp4"
         final_path = videos_dir / basename
         part_path = videos_dir / f".{basename}.part.mp4"
+        sources = list(candidate.video_sources)
+        if not sources:
+            media_url = candidate.media_url or candidate.image_url
+            sources = [PinterestVideoSource(media_url, candidate.video_width, candidate.video_height, candidate.duration, candidate.bitrate, "hls" if ".m3u8" in media_url.lower() else "mp4")]
+            sources.extend(
+                PinterestVideoSource(url, candidate.video_width, candidate.video_height, candidate.duration, candidate.bitrate, "hls" if ".m3u8" in url.lower() else "mp4")
+                for url in candidate.fallback_urls
+                if url != media_url
+            )
+        result = None
+        selected_source = None
+        last_error: Exception | None = None
         try:
-            self.on_log("Media视频阶段=downloading_hls")
-            result = HLSDownloader(
-                client,
-                {"Referer": "https://x.com/", "User-Agent": "Mozilla/5.0"},
-                self.config.retry_count,
-                self.stop_event.is_set,
-                self._wait_if_paused,
-            ).download(candidate.media_url or candidate.image_url, part_path)
+            is_x = self.config.canonical_platform() == "x"
+            stage_label = "Media视频阶段" if is_x else "Pinterest视频阶段"
+            referer = "https://x.com/" if is_x else "https://www.pinterest.com/"
+            for source in sources:
+                if self.stop_event.is_set():
+                    raise HLSDownloadCancelled()
+                try:
+                    self.on_log(f"{stage_label}=downloading_{source.kind}")
+                    if source.kind == "hls":
+                        result = HLSDownloader(
+                            client,
+                            {"Referer": referer, "User-Agent": "Mozilla/5.0"},
+                            self.config.retry_count,
+                            self.stop_event.is_set,
+                            self._wait_if_paused,
+                        ).download(source.url, part_path)
+                    else:
+                        result = self._download_direct_video(client, source.url, part_path, source, referer)
+                    selected_source = source
+                    break
+                except HLSDownloadCancelled:
+                    raise
+                except (HLSDownloadError, httpx.HTTPError, OSError) as exc:
+                    last_error = exc
+                    if part_path.exists():
+                        part_path.unlink()
+                    self.on_log(f"Pinterest视频候选失败，将继续后续来源：{source.url} - {exc}")
+            if result is None or selected_source is None:
+                raise last_error or HLSDownloadError("Pinterest 视频没有可用下载来源。")
             if self.stop_event.is_set():
                 raise HLSDownloadCancelled()
             digest = self._file_hash(part_path)
@@ -323,22 +366,38 @@ class DownloadEngine:
             record.duration = result.duration or record.duration
             record.video_width = result.width or record.video_width
             record.video_height = result.height or record.video_height
-            record.bitrate = result.bitrate
+            record.bitrate = result.bitrate or selected_source.bitrate
             store.append(record)
             known.add(digest)
             self.stats.downloaded += 1
             self.database.register_media(candidate, self.config.canonical_source_value, digest, final_path, self.config.task_id)
             self.on_log(f"已保存 {record.filename}（视频）")
-            self.on_log("Media视频阶段=mp4_saved")
+            self.on_log("Pinterest视频阶段=mp4_saved")
         except HLSDownloadCancelled:
-            self.on_log("Media视频阶段失败：failed_stage=stopped")
+            self.on_log(f"{stage_label}=failed_stage=stopped")
             raise
         except HLSDownloadError as exc:
-            self.on_log(f"Media视频阶段失败：failed_stage=hls_download_or_ffmpeg，{exc}")
+            self.on_log(f"{stage_label}=failed_stage=hls_download_or_ffmpeg，{exc}")
             raise
         finally:
             if part_path.exists():
                 part_path.unlink()
+
+    def _download_direct_video(self, client: httpx.Client, url: str, output_path: Path, source: PinterestVideoSource, referer: str):
+        with client.stream("GET", url, headers={"Referer": referer, "User-Agent": "Mozilla/5.0"}) as response:
+            response.raise_for_status()
+            with output_path.open("wb") as handle:
+                for chunk in response.iter_bytes(1024 * 1024):
+                    if self.stop_event.is_set():
+                        raise HLSDownloadCancelled()
+                    self._wait_if_paused()
+                    if self.stop_event.is_set():
+                        raise HLSDownloadCancelled()
+                    handle.write(chunk)
+        if not output_path.exists() or output_path.stat().st_size < 1024:
+            raise HLSDownloadError("Pinterest MP4 文件为空或不完整。")
+        from src.downloader.hls import HLSResult
+        return HLSResult(source.duration, source.width, source.height, source.bitrate)
 
     @staticmethod
     def _file_hash(path: Path) -> str:
