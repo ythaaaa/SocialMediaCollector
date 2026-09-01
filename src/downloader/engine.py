@@ -229,15 +229,28 @@ class DownloadEngine:
             if candidate.media_type == "video":
                 self._download_video(client, candidate, record, store, known)
                 return
-            content = b""
-            for attempt in range(self.config.retry_count):
-                try:
-                    referer = "https://x.com/" if platform == "x" else "https://www.pinterest.com/"
-                    response = client.get(media_url, headers={"Referer": referer})
-                    response.raise_for_status(); content = response.content; break
-                except httpx.HTTPError:
-                    if attempt == self.config.retry_count - 1: raise
-                    self._sleep_controlled(1 + attempt)
+            content: bytes | None = None
+            last_error: httpx.HTTPError | None = None
+            download_urls = list(dict.fromkeys(url for url in (media_url, *candidate.fallback_urls) if url))
+            for download_url in download_urls:
+                for attempt in range(self.config.retry_count):
+                    try:
+                        referer = "https://x.com/" if platform == "x" else "https://www.pinterest.com/"
+                        response = client.get(download_url, headers={"Referer": referer})
+                        response.raise_for_status()
+                        content = response.content
+                        media_url = download_url
+                        break
+                    except httpx.HTTPError as exc:
+                        last_error = exc
+                        if attempt < self.config.retry_count - 1:
+                            self._sleep_controlled(1 + attempt)
+                if content is not None:
+                    break
+            if content is None:
+                raise last_error or httpx.HTTPError("图片下载失败")
+            record.image_url = media_url
+            record.media_url = media_url
             digest = hashlib.sha256(content).hexdigest()
             if digest in known or self.database.find_hash_duplicate(digest):
                 self.stats.duplicate_count += 1

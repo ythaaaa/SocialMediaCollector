@@ -427,11 +427,13 @@ class XCollector(PinterestCollector):
                 str(url) for url in item.get("images") or []
                 if re.search(r"pbs\.twimg\.com/media/", str(url), re.IGNORECASE)
             ]
-            image_urls = list(dict.fromkeys(
-                self._prefer_original_url(url)
-                for url in raw_images
-                if not re.search(r"(?:ext_tw_video_thumb|amplify_video_thumb)", url, re.IGNORECASE)
-            ))
+            image_urls: list[tuple[str, str]] = []
+            for raw_url in raw_images:
+                if re.search(r"(?:ext_tw_video_thumb|amplify_video_thumb)", raw_url, re.IGNORECASE):
+                    continue
+                image_url = self._prefer_original_url(raw_url)
+                if image_url not in {item[0] for item in image_urls}:
+                    image_urls.append((image_url, raw_url))
             post_text = ""
             detection = self.prompt_detector.detect("")
             if only_prompt_posts:
@@ -501,7 +503,7 @@ class XCollector(PinterestCollector):
             diagnostics.image_item_count += len(image_urls)
             if media_type not in {"image", "mixed"}:
                 continue
-            for image_url in image_urls:
+            for image_url, fallback_url in image_urls:
                 if image_url in candidates:
                     continue
                 candidate = ImageCandidate(
@@ -518,6 +520,7 @@ class XCollector(PinterestCollector):
                     post_text=post_text,
                     prompt_detected=detection.prompt_detected,
                     prompt=detection.prompt,
+                    fallback_urls=(fallback_url,) if image_url != fallback_url else (),
                 )
                 candidates[image_url] = candidate
                 diagnostics.media_candidate_count += 1
@@ -841,6 +844,7 @@ class XCollector(PinterestCollector):
                         post_text=post_text,
                         prompt_detected=detection.prompt_detected,
                         prompt=detection.prompt,
+                        fallback_urls=(str(raw_url),) if image_url != str(raw_url) else (),
                         posted_at=posted_at,
                     )
                     candidates[image_url] = candidate

@@ -1,5 +1,6 @@
 from pathlib import Path
 
+import httpx
 from PIL import Image
 
 from src.browser import ImageCandidate
@@ -80,6 +81,43 @@ def test_download_count_means_successful_images_not_discovered_candidates(tmp_pa
 
     assert len(list((task_dir / "images").iterdir())) == 2
     assert (task_dir / "task.json").read_text(encoding="utf-8").find('"downloaded": 2') >= 0
+
+
+def test_image_download_falls_back_when_highest_quality_url_fails(tmp_path: Path) -> None:
+    config = TaskConfig("test", 1, tmp_path / "output", min_width=2, min_height=2, interval_seconds=0)
+    engine = DownloadEngine(config, tmp_path / "profile", database=CollectorDatabase(tmp_path / "collector.db"))
+    engine.task_dir = tmp_path / "task"
+    engine.task_dir.mkdir()
+    (engine.task_dir / "images").mkdir()
+    store = TaskStore(engine.task_dir, config)
+    payload = _image_bytes((4, 4), "purple")
+    highest = "https://i.pinimg.com/originals/a/b/image.jpg"
+    fallback = "https://i.pinimg.com/736x/a/b/image.jpg"
+    calls: list[str] = []
+
+    class Client:
+        def get(self, url: str, **_kwargs):
+            calls.append(url)
+            if url == highest:
+                request = httpx.Request("GET", url)
+                response = httpx.Response(404, request=request)
+                response.raise_for_status()
+            return type("Response", (), {"content": payload, "raise_for_status": lambda self: None})()
+
+    candidate = ImageCandidate(
+        highest,
+        "https://www.pinterest.com/pin/123/",
+        media_url=highest,
+        fallback_urls=(fallback,),
+    )
+
+    engine._download_one(Client(), candidate, store, set())
+
+    assert calls == [highest, highest, highest, fallback]
+    assert engine.stats.downloaded == 1
+    assert (engine.task_dir / "images" / "0001.png").exists()
+    metadata = (engine.task_dir / "metadata.csv").read_text(encoding="utf-8-sig")
+    assert fallback in metadata
 
 
 def test_engine_reports_task_directory_as_soon_as_it_is_created(tmp_path: Path, monkeypatch) -> None:

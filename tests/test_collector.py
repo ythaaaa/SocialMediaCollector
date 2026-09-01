@@ -9,6 +9,7 @@ def test_srcset_prefers_largest_declared_candidate() -> None:
 
 def test_pinimg_sized_url_prefers_original_variant() -> None:
     assert PinterestCollector._prefer_original_url("https://i.pinimg.com/736x/aa/bb/cc.jpg") == "https://i.pinimg.com/originals/aa/bb/cc.jpg"
+    assert PinterestCollector._prefer_original_url("https://i.pinimg.com/60x60/aa/bb/cc.jpg") == "https://i.pinimg.com/originals/aa/bb/cc.jpg"
 
 
 class FakePage:

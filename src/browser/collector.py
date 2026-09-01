@@ -33,6 +33,7 @@ class ImageCandidate:
     prompt_detected: bool = False
     prompt: str = ""
     posted_at: str = ""
+    fallback_urls: tuple[str, ...] = ()
 
 
 class PinterestCollector(BrowserSession):
@@ -65,7 +66,7 @@ class PinterestCollector(BrowserSession):
             on_found,
             on_candidate,
             should_finish,
-            require_pin=False,
+            require_pin=True,
             empty_message="未检测到 Pinterest 搜索结果。请确认已在浏览器中完成登录/验证，或稍后重试。",
         )
 
@@ -260,9 +261,10 @@ class PinterestCollector(BrowserSession):
         for item in items:
             best = self._best_url(item.get("src", ""), item.get("srcset", ""))
             if best and "pinimg.com" in best and (not require_pin or "/pin/" in item.get("parent", "")):
-                best = self._prefer_original_url(best)
+                fallback_url = best
+                best = self._prefer_original_url(fallback_url)
                 pin_url = urljoin(page.url, item.get("parent", ""))
-                candidate = ImageCandidate(best, pin_url, page.url)
+                candidate = ImageCandidate(best, pin_url, page.url, fallback_urls=(fallback_url,) if best != fallback_url else ())
                 if best not in candidates:
                     candidates[best] = candidate
                     if on_candidate:
@@ -271,7 +273,7 @@ class PinterestCollector(BrowserSession):
     @staticmethod
     def _prefer_original_url(url: str) -> str:
         """Pinterest's public CDN uses a size path; prefer its original variant when available."""
-        return re.sub(r"(https?://i\.pinimg\.com/)(?:\d+x)/", r"\1originals/", url)
+        return re.sub(r"(https?://i\.pinimg\.com/)(?:\d+x\d*|\d+x)/", r"\1originals/", url)
 
     @staticmethod
     def _best_url(src: str, srcset: str) -> str:

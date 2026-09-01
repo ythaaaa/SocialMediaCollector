@@ -57,6 +57,7 @@ def test_x_collector_uses_original_media_and_filters_non_author_video_content() 
     assert len(candidates) == 2
     assert all(candidate.platform == "x" for candidate in candidates.values())
     assert all("name=orig" in candidate.image_url for candidate in candidates.values())
+    assert all(candidate.fallback_urls == (candidate.image_url.replace("name=orig", "name=small"),) for candidate in candidates.values())
 
 
 def test_x_home_and_media_type_configurations_are_valid() -> None:

@@ -60,7 +60,7 @@ def select_variant(master_text: str, master_url: str) -> tuple[str, int | None, 
         variants.append((bandwidth, width * height, index, urljoin(master_url, lines[index + 1].strip()), audio_groups.get(attrs.get("AUDIO", ""))))
     if not variants:
         return master_url, None, None, None, None
-    bandwidth, _area, _index, variant_url, audio_url = max(variants, key=lambda item: (item[0], item[1]))
+    bandwidth, _area, _index, variant_url, audio_url = max(variants, key=lambda item: (item[1], item[0]))
     chosen = next(item for item in variants if item[3] == variant_url and item[0] == bandwidth)
     width = height = None
     attrs = parse_attributes(lines[chosen[2]].split(":", 1)[1])

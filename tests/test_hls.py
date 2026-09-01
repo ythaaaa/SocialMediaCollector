@@ -20,6 +20,37 @@ high.m3u8
     assert selected[4].endswith("audio.m3u8")
 
 
+def test_hls_prefers_highest_resolution_before_bandwidth() -> None:
+    master = """#EXTM3U
+#EXT-X-STREAM-INF:BANDWIDTH=5000000,RESOLUTION=1280x720
+720.m3u8
+#EXT-X-STREAM-INF:BANDWIDTH=1000000,RESOLUTION=1920x1080
+1080.m3u8
+"""
+
+    selected = select_variant(master, "https://video.twimg.com/amplify_video/1/pl/master.m3u8")
+
+    assert selected[:4] == ("https://video.twimg.com/amplify_video/1/pl/1080.m3u8", 1920, 1080, 1000000)
+
+
+def test_hls_prefers_bandwidth_for_same_or_missing_resolution() -> None:
+    same_resolution = """#EXTM3U
+#EXT-X-STREAM-INF:BANDWIDTH=1000000,RESOLUTION=1280x720
+low.m3u8
+#EXT-X-STREAM-INF:BANDWIDTH=2000000,RESOLUTION=1280x720
+high.m3u8
+"""
+    missing_resolution = """#EXTM3U
+#EXT-X-STREAM-INF:BANDWIDTH=1000000
+low.m3u8
+#EXT-X-STREAM-INF:BANDWIDTH=2000000
+high.m3u8
+"""
+
+    assert select_variant(same_resolution, "https://video.twimg.com/master.m3u8")[0].endswith("high.m3u8")
+    assert select_variant(missing_resolution, "https://video.twimg.com/master.m3u8")[0].endswith("high.m3u8")
+
+
 def test_hls_attributes_strip_quotes() -> None:
     assert parse_attributes('BANDWIDTH=1234,RESOLUTION="640x360",AUDIO="a"') == {
         "BANDWIDTH": "1234",
