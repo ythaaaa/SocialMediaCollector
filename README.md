@@ -115,6 +115,7 @@ GUI 的“打开浏览器 / 登录”入口会直接启动本机普通 `chrome.e
 * 已知风险：X DOM/selector、动态 Feed、广告节点和 HLS 结构可能变化；平台可能出现登录、验证码和访问频率限制；HLS 加密播放列表暂不支持；视频停止通常在当前 FFmpeg 媒体完成后生效；Pinterest CDN 偶发 403；LGPL 选择不包含 GPL-only 的 libx264/libx265，未来若引入其他 FFmpeg 编码能力需重新审查许可证与运行时依赖
 * Git：Release 固化为本地 commit 和 annotated tag `v1.0.0`；不 push、不创建 GitHub Release；`.venv`、browser-data、Cookie、登录数据、测试媒体和临时 `.part` 不进入 Git
 * V2 Phase 1：内部开发版本 `2.0.0-dev`；GUI 按 `platform + collection_mode` 隔离并恢复输入状态；Pinterest 搜索 URL 输入会被拦截；X 作者输入在进入采集逻辑前统一为 username；现有 `TaskConfig` 扩展了 task_id、source_value、download_interval、save_dir、only_author_posts 和 status 兼容接口，为后续任务队列预留结构
+* V2 Phase 2（当前开发中，未提交）：支持 Pinterest 关键词和 X 作者多行批量添加；队列按顺序串行执行，支持等待/运行中/暂停/已完成/失败/已停止状态、失败后继续和 queue.json 持久化；不启用并发采集
 * 下一步：仅处理必要的发布维护、签名或远程发布策略；不新增采集功能、不迁移 Profile、不内置 FFmpeg 源码
 
 ## v1.0.0 发布内容
