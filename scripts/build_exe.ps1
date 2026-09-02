@@ -40,6 +40,7 @@ $pyInstallerArgs = @(
     '--add-data', "$license;vendor\ffmpeg",
     '--add-binary', "$ffmpeg;vendor\ffmpeg",
     '--icon', (Join-Path $assets 'app_icon.ico'),
+    '--version-file', (Join-Path $projectRoot 'installer\version_info.txt'),
     'app.py'
 )
 foreach ($dll in $runtimeDlls) {
