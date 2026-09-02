@@ -25,7 +25,7 @@ from src.models import TaskConfig, TaskStats
 from src.storage import CollectorDatabase, QueueStore
 from src.tasks import BatchInputError, QueueTask, build_batch_configs, remove_queue_tasks
 from src.ui.input_state import ModeInputState
-from src.ui.resources import app_icon_path, resource_path, stylesheet
+from src.ui.resources import app_icon_path, resource_path, set_windows_app_user_model_id, stylesheet
 from src.utils.paths import browser_profile_directory
 from src.version import APP_VERSION
 
@@ -49,6 +49,7 @@ class Worker(QThread):
     log = Signal(str)
     stats = Signal(object)
     task_started = Signal(str)
+    control_status = Signal(str)
     done = Signal(str)
     failed = Signal(str)
 
@@ -62,6 +63,7 @@ class Worker(QThread):
             lambda path: self.task_started.emit(str(path)),
             browser_manager=browser_manager,
         )
+        self.engine.on_control_status = self.control_status.emit
 
     def run(self) -> None:
         try:
@@ -130,6 +132,8 @@ class MainWindow(QMainWindow):
         self.database = CollectorDatabase()
         self.queue_tasks: list[QueueTask] = []
         self.queue_runner: QueueRunner | None = None
+        self._control_state = "idle"
+        self._task_active = False
 
         self._create_controls()
         self._build_window()
@@ -152,6 +156,7 @@ class MainWindow(QMainWindow):
         self.search_scope.addItem("热门", "top")
         self.search_scope.setMinimumHeight(36)
         self.search_scope_label = self._field_label("搜索范围")
+        self.search_scope_field = self._parameter_field_with_label(self.search_scope_label, self.search_scope)
         self.media_type = QComboBox()
         self.media_type.addItem("仅图片", "image")
         self.media_type.addItem("仅视频", "video")
@@ -251,8 +256,17 @@ class MainWindow(QMainWindow):
         self.history_table.setHorizontalHeaderLabels(["时间", "平台", "模式", "来源", "目标", "成功", "重复", "状态"])
         self.history_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         self.history_table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
+        self.history_table.setSelectionMode(QTableWidget.SelectionMode.ExtendedSelection)
         self.history_table.setMinimumHeight(170)
+        self.history_empty = QLabel("暂无任务历史")
+        self.history_empty.setObjectName("emptyState")
+        self.history_empty.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.history_empty.setMinimumHeight(110)
         self.refresh_history = QPushButton("刷新历史")
+        self.delete_history = QPushButton("删除选中记录")
+        self.delete_history.setObjectName("secondaryButton")
+        self.clear_history = QPushButton("清空全部历史")
+        self.clear_history.setObjectName("warningButton")
         self.open_history_dir = QPushButton("打开历史目录")
         self.recollect_history = QPushButton("重新采集")
         self.retry_history = QPushButton("重试失败任务")
@@ -385,9 +399,8 @@ class MainWindow(QMainWindow):
         grid.setHorizontalSpacing(12)
         grid.addWidget(self._parameter_field("平台", self.platform), 0, 0)
         grid.addWidget(self._parameter_field("采集模式", self.mode), 0, 1)
-        grid.addWidget(self._parameter_field_with_label(self.search_scope_label, self.search_scope), 0, 2)
-        grid.addWidget(self._parameter_field_with_label(self.media_type_label, self.media_type), 0, 3)
-        for column in range(4):
+        grid.addWidget(self._parameter_field_with_label(self.media_type_label, self.media_type), 0, 2)
+        for column in range(3):
             grid.setColumnStretch(column, 1)
         layout.addLayout(grid)
         return card
@@ -406,6 +419,7 @@ class MainWindow(QMainWindow):
         card, layout = self._card("目标内容", "单任务填写一项；批量任务每行填写一个关键词或作者。")
         layout.addWidget(self.source_label)
         layout.addWidget(self.keyword)
+        layout.addWidget(self.search_scope_field)
         layout.addWidget(self.current_page_info)
         self.batch_mode.setObjectName("modeSwitch")
         layout.addWidget(self.batch_mode)
@@ -473,7 +487,10 @@ class MainWindow(QMainWindow):
     def _build_history_card(self) -> QFrame:
         card, layout = self._card("任务历史", "记录单任务与队列任务；重新采集会创建新的任务记录。")
         layout.addWidget(self.history_table)
+        layout.addWidget(self.history_empty)
         actions = QHBoxLayout()
+        actions.addWidget(self.delete_history)
+        actions.addWidget(self.clear_history)
         actions.addStretch(1)
         actions.addWidget(self.refresh_history)
         actions.addWidget(self.open_history_dir)
@@ -571,6 +588,8 @@ class MainWindow(QMainWindow):
         self.clear_completed.clicked.connect(self.clear_completed_tasks)
         self.advanced_toggle.toggled.connect(self._toggle_advanced)
         self.refresh_history.clicked.connect(self._refresh_history)
+        self.delete_history.clicked.connect(self.delete_selected_history)
+        self.clear_history.clicked.connect(self.clear_all_history)
         self.open_history_dir.clicked.connect(self.open_history_directory)
         self.recollect_history.clicked.connect(self.recollect_selected)
         self.retry_history.clicked.connect(self.retry_selected)
@@ -635,6 +654,7 @@ class MainWindow(QMainWindow):
             self.media_type.setVisible(True)
             self.search_scope_label.setVisible(search_mode)
             self.search_scope.setVisible(search_mode)
+            self.search_scope_field.setVisible(search_mode)
             if search_mode:
                 self.search_scope.blockSignals(True)
                 index = self.search_scope.findData(self._search_scope_state)
@@ -676,6 +696,7 @@ class MainWindow(QMainWindow):
         self.media_type.setVisible(True)
         self.search_scope_label.setVisible(False)
         self.search_scope.setVisible(False)
+        self.search_scope_field.setVisible(False)
         self._update_batch_controls()
         if current_page:
             self.source_label.setVisible(False)
@@ -848,6 +869,7 @@ class MainWindow(QMainWindow):
         self.queue_runner.stats.connect(self.update_stats)
         self.queue_runner.task_started.connect(self.task_started)
         self.queue_runner.task_status.connect(self._queue_task_status)
+        self.queue_runner.control_status.connect(self._control_status_changed)
         self.queue_runner.finished_queue.connect(self._queue_finished)
         self._set_running(True)
         self.append_log("开始按顺序执行任务队列。")
@@ -862,7 +884,10 @@ class MainWindow(QMainWindow):
         self._refresh_queue_table()
 
     def _queue_finished(self) -> None:
-        self.append_log("任务队列执行结束。")
+        was_stopping = self._control_state == "stopping"
+        if was_stopping:
+            self.status.setText("已停止")
+        self.append_log("任务已停止" if was_stopping else "任务队列执行结束。")
         self._refresh_history()
         self.queue_runner = None
         self._set_running(False)
@@ -874,6 +899,9 @@ class MainWindow(QMainWindow):
             "interrupted": "中断（未自动恢复）",
         }
         rows = self.database.list_history()
+        has_history = bool(rows)
+        self.history_table.setVisible(has_history)
+        self.history_empty.setVisible(not has_history)
         self.history_table.setRowCount(len(rows))
         for row_index, row in enumerate(rows):
             values = [
@@ -892,8 +920,63 @@ class MainWindow(QMainWindow):
                     item.setData(Qt.ItemDataRole.UserRole, str(row.get("task_id") or ""))
                 self.history_table.setItem(row_index, column, item)
         self.history_table.resizeColumnsToContents()
-        self.retry_history.setEnabled(False)
-        self.recollect_history.setEnabled(bool(rows))
+        self._history_selection_changed()
+
+    def _selected_history_ids(self) -> list[str]:
+        ids: list[str] = []
+        for index in self.history_table.selectionModel().selectedRows():
+            item = self.history_table.item(index.row(), 0)
+            task_id = str(item.data(Qt.ItemDataRole.UserRole) or "") if item else ""
+            if task_id and task_id not in ids:
+                ids.append(task_id)
+        return ids
+
+    def _active_history_ids(self) -> set[str]:
+        ids: set[str] = set()
+        if self._task_active and self.worker:
+            ids.add(self.worker.engine.config.task_id)
+        if self._task_active and self.queue_runner and self.queue_runner.current_task:
+            ids.add(self.queue_runner.current_task.task_id)
+        return ids
+
+    def delete_selected_history(self) -> None:
+        task_ids = self._selected_history_ids()
+        if not task_ids:
+            QMessageBox.information(self, "任务历史", "请先选择要删除的历史记录。")
+            return
+        active_ids = self._active_history_ids()
+        rows = [self.database.get_history(task_id) for task_id in task_ids]
+        if any(
+            row and (str(row.get("status") or "") == "running" or task_id in active_ids)
+            for task_id, row in zip(task_ids, rows)
+        ):
+            QMessageBox.warning(self, "无法删除历史", "运行中的任务不能删除历史记录，请先停止任务。")
+            return
+        self.database.delete_task_history(task_ids)
+        self._refresh_history()
+
+    def clear_all_history(self) -> None:
+        rows = self.database.list_history()
+        if not rows:
+            self._refresh_history()
+            return
+        active_ids = self._active_history_ids()
+        if any(
+            str(row.get("status") or "") == "running" or str(row.get("task_id") or "") in active_ids
+            for row in rows
+        ):
+            QMessageBox.warning(self, "无法清空历史", "运行中的任务不能删除历史记录，请先停止任务。")
+            return
+        dialog = QMessageBox(self)
+        dialog.setWindowTitle("清空全部历史")
+        dialog.setText("确定清空全部任务历史吗？\n此操作只删除历史记录，不会删除已下载的图片、视频或任务文件夹。")
+        cancel = dialog.addButton("取消", QMessageBox.ButtonRole.RejectRole)
+        confirm = dialog.addButton("确定清空", QMessageBox.ButtonRole.AcceptRole)
+        dialog.exec()
+        if dialog.clickedButton() is not confirm:
+            return
+        self.database.clear_task_history()
+        self._refresh_history()
 
     def _selected_history_row(self) -> dict[str, object] | None:
         row_index = self.history_table.currentRow()
@@ -934,8 +1017,15 @@ class MainWindow(QMainWindow):
 
     def _history_selection_changed(self) -> None:
         row = self._selected_history_row()
-        self.recollect_history.setEnabled(row is not None)
-        self.retry_history.setEnabled(bool(row and str(row.get("status") or "") in {"failed", "stopped", "interrupted"}))
+        task_ids = self._selected_history_ids()
+        can_use_history = not self._task_active
+        self.delete_history.setEnabled(bool(task_ids))
+        self.open_history_dir.setEnabled(can_use_history and row is not None)
+        self.recollect_history.setEnabled(can_use_history and row is not None)
+        self.retry_history.setEnabled(can_use_history and bool(
+            row and str(row.get("status") or "") in {"failed", "stopped", "interrupted"}
+        ))
+        self.clear_history.setEnabled(bool(self.database.list_history()))
 
     def choose_dir(self) -> None:
         path = QFileDialog.getExistingDirectory(self, "选择图片保存目录", self.output.text())
@@ -971,6 +1061,7 @@ class MainWindow(QMainWindow):
         self.worker.log.connect(self.append_log)
         self.worker.stats.connect(self.update_stats)
         self.worker.task_started.connect(self.task_started)
+        self.worker.control_status.connect(self._control_status_changed)
         self.worker.done.connect(self.task_done)
         self.worker.failed.connect(self.task_failed)
         self._set_running(True)
@@ -990,33 +1081,52 @@ class MainWindow(QMainWindow):
         self.login_worker.start()
 
     def pause_task(self) -> None:
+        if not self._is_task_running() or self._control_state != "running":
+            return
+        self._set_control_state("pausing", "正在暂停...", "已请求暂停任务")
         if self.queue_runner and self.queue_runner.isRunning():
             self.queue_runner.pause()
-            self.append_log("队列当前任务已暂停。")
-            self.status.setText("任务已暂停")
         elif self.worker and self.worker.isRunning():
             self.worker.engine.pause()
-            self.append_log("任务已暂停。")
-            self.status.setText("任务已暂停")
 
     def resume_task(self) -> None:
+        if not self._is_task_running() or self._control_state != "paused":
+            return
+        self._set_control_state("resuming", "正在继续...", "已请求继续任务")
         if self.queue_runner and self.queue_runner.isRunning():
             self.queue_runner.resume()
-            self.append_log("队列当前任务继续执行。")
         elif self.worker and self.worker.isRunning():
             self.worker.engine.resume()
-            self.append_log("任务继续执行。")
 
     def stop_task(self) -> None:
+        if not self._is_task_running() or self._control_state == "stopping":
+            return
+        self._set_control_state("stopping", "正在停止...", "正在停止任务...")
         if self.queue_runner and self.queue_runner.isRunning():
             self.queue_runner.stop()
-            self.append_log("正在停止任务队列……")
         elif self.worker and self.worker.isRunning():
             self.worker.engine.stop()
-            self.append_log("正在安全停止任务……")
+
+    def _is_task_running(self) -> bool:
+        return self._task_active
+
+    def _set_control_state(self, state: str, status: str | None = None, log: str | None = None) -> None:
+        self._control_state = state
+        if status:
+            self.status.setText(status)
+        if log:
+            self.append_log(log)
+        self._refresh_control_buttons()
+
+    def _control_status_changed(self, status: str) -> None:
+        if status == "paused":
+            self._set_control_state("paused", "已暂停", "任务已暂停")
+        elif status == "running":
+            self._set_control_state("running", "运行中", "已继续任务")
 
     def update_stats(self, stats: TaskStats) -> None:
-        self.status.setText(stats.current_status)
+        if self._control_state not in {"pausing", "paused", "resuming", "stopping"}:
+            self.status.setText(stats.current_status)
         self.found_block.set_value(stats.discovered)
         self.success_block.set_value(stats.downloaded)
         self.skipped_block.set_value(stats.skipped)
@@ -1039,11 +1149,14 @@ class MainWindow(QMainWindow):
         self.log.moveCursor(QTextCursor.MoveOperation.End)
 
     def task_done(self, directory: str) -> None:
+        was_stopping = self._control_state == "stopping"
+        if was_stopping:
+            self.status.setText("已停止")
         self.task_started(directory)
         self._refresh_history()
         self.open_dir.setProperty("attention", True)
         self._refresh_style(self.open_dir)
-        self.append_log(f"任务结束：{directory}")
+        self.append_log("任务已停止" if was_stopping else f"任务结束：{directory}")
         self._set_running(False)
 
     def task_started(self, directory: str) -> None:
@@ -1064,6 +1177,10 @@ class MainWindow(QMainWindow):
             os.startfile(str(target))
 
     def _set_running(self, running: bool) -> None:
+        self._control_state = "running" if running else "idle"
+        self._task_active = running
+        if running:
+            self.status.setText("运行中")
         self.start.setEnabled(not running)
         self.platform.setEnabled(not running)
         self.mode.setEnabled(not running)
@@ -1073,11 +1190,6 @@ class MainWindow(QMainWindow):
         self.start_queue.setEnabled(not running)
         self.clear_completed.setEnabled(not running)
         self.refresh_history.setEnabled(not running)
-        self.open_history_dir.setEnabled(not running)
-        self.recollect_history.setEnabled(not running and self.history_table.currentRow() >= 0)
-        self.retry_history.setEnabled(not running and self.history_table.currentRow() >= 0 and bool(
-            self._selected_history_row() and str(self._selected_history_row().get("status") or "") in {"failed", "stopped", "interrupted"}
-        ))
         if running:
             self.keyword.setEnabled(False)
             self.only_author.setEnabled(False)
@@ -1086,13 +1198,18 @@ class MainWindow(QMainWindow):
             self.only_author.setEnabled(True)
             self._mode_changed(self.mode.currentIndex())
         self._update_batch_controls(running)
-        self.pause.setEnabled(running)
-        self.resume.setEnabled(running)
-        self.stop.setEnabled(running)
+        self._refresh_control_buttons()
+        self._history_selection_changed()
         self.login_browser.setEnabled(not running and not (self.login_worker and self.login_worker.isRunning()))
         if running:
             self.open_dir.setProperty("attention", False)
             self._refresh_style(self.open_dir)
+
+    def _refresh_control_buttons(self) -> None:
+        running = self._is_task_running()
+        self.pause.setEnabled(running and self._control_state == "running")
+        self.resume.setEnabled(running and self._control_state == "paused")
+        self.stop.setEnabled(running and self._control_state != "stopping")
 
     @staticmethod
     def _refresh_style(widget: QWidget) -> None:
@@ -1123,6 +1240,7 @@ class MainWindow(QMainWindow):
 
 def run() -> None:
     QApplication.setAttribute(Qt.ApplicationAttribute.AA_UseHighDpiPixmaps)
+    set_windows_app_user_model_id()
     app = QApplication(sys.argv)
     app.setWindowIcon(QIcon(app_icon_path()))
     app.setStyleSheet(stylesheet())

@@ -5,7 +5,7 @@ import sqlite3
 from dataclasses import asdict
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Iterable
 
 from src.models import TaskConfig
 from src.utils.paths import application_data_directory
@@ -269,6 +269,42 @@ class CollectorDatabase:
         except Exception as exc:
             self._warn(exc)
             return None
+
+    def delete_task_history(self, task_ids: Iterable[str]) -> int:
+        """Delete only task history rows; media_index and files are untouched."""
+        ids = [str(task_id).strip() for task_id in task_ids if str(task_id).strip()]
+        if not ids:
+            return 0
+        placeholders = ", ".join("?" for _ in ids)
+        try:
+            with self._connect() as db:
+                running = db.execute(
+                    f"SELECT COUNT(*) FROM task_history WHERE task_id IN ({placeholders}) AND status = 'running'",
+                    ids,
+                ).fetchone()[0]
+                if running:
+                    return 0
+                cursor = db.execute(
+                    f"DELETE FROM task_history WHERE task_id IN ({placeholders})",
+                    ids,
+                )
+                return max(0, cursor.rowcount)
+        except Exception as exc:
+            self._warn(exc)
+            return 0
+
+    def clear_task_history(self) -> int:
+        """Clear task history in one transaction without touching global indexes."""
+        try:
+            with self._connect() as db:
+                count = int(db.execute("SELECT COUNT(*) FROM task_history").fetchone()[0])
+                if db.execute("SELECT COUNT(*) FROM task_history WHERE status = 'running'").fetchone()[0]:
+                    return 0
+                db.execute("DELETE FROM task_history")
+                return count
+        except Exception as exc:
+            self._warn(exc)
+            return 0
 
     def load_task_config(self, task_id: str) -> TaskConfig | None:
         row = self.get_history(task_id)

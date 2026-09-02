@@ -96,6 +96,14 @@ def test_remove_selected_tasks_updates_queue_json_and_reload(tmp_path: Path) -> 
     assert [task.config.keyword for task in store.load()] == ["one", "three"]
 
 
+@pytest.mark.parametrize("status", ["pending", "failed", "stopped", "completed"])
+def test_remove_selected_task_allows_non_running_statuses(status: str) -> None:
+    task = _runner_tasks("removable")[0]
+    task.status = status
+
+    assert remove_queue_tasks([task], {task.task_id}) == []
+
+
 def test_remove_multiple_selected_tasks_and_keep_x_and_pinterest_tasks(tmp_path: Path) -> None:
     pinterest = QueueTask(TaskConfig("cats", 1, tmp_path, platform="pinterest", collection_mode="search"))
     x_search = QueueTask(TaskConfig("", 1, tmp_path, platform="x", collection_mode="search", source_identifier="cats"))
@@ -111,9 +119,58 @@ def test_running_task_is_protected_from_queue_removal(tmp_path: Path) -> None:
     tasks = _runner_tasks("running", "pending")
     tasks[0].status = "running"
 
-    with pytest.raises(ValueError, match="运行中的任务请先停止后再移除"):
+    with pytest.raises(ValueError, match="运行中或暂停中的任务请先停止，再从队列中删除"):
         remove_queue_tasks(tasks, {tasks[0].task_id})
     assert [task.config.keyword for task in tasks] == ["running", "pending"]
+
+
+def test_paused_task_is_protected_from_queue_removal() -> None:
+    task = _runner_tasks("paused")[0]
+    task.status = "paused"
+
+    with pytest.raises(ValueError, match="运行中或暂停中的任务请先停止，再从队列中删除"):
+        remove_queue_tasks([task], {task.task_id})
+
+
+def test_mixed_selection_with_protected_task_is_rejected_without_partial_delete() -> None:
+    tasks = _runner_tasks("failed", "running", "stopped")
+    tasks[0].status = "failed"
+    tasks[1].status = "running"
+    tasks[2].status = "stopped"
+
+    with pytest.raises(ValueError, match="运行中或暂停中的任务请先停止，再从队列中删除"):
+        remove_queue_tasks(tasks, {task.task_id for task in tasks})
+    assert [task.status for task in tasks] == ["failed", "running", "stopped"]
+
+
+def test_failed_queue_removal_keeps_history_files_and_media_index(tmp_path: Path) -> None:
+    database = CollectorDatabase(tmp_path / "collector.db")
+    config = TaskConfig("failed", 1, tmp_path)
+    output = tmp_path / "failed-task"
+    output.mkdir()
+    image = output / "image.jpg"
+    image.write_bytes(b"image")
+    database.start_task(config, output)
+    database.finish_task(config, TaskStats(downloaded=1), "failed", task_output_dir=output)
+    database.register_media(
+        type("Candidate", (), {"platform": "pinterest", "media_type": "image", "media_url": "https://cdn.test/failed.jpg", "image_url": "https://cdn.test/failed.jpg", "post_url": "", "pin_url": "", "post_id": "", "media_identity": ""})(),
+        "failed",
+        "hash-failed",
+        image,
+        config.task_id,
+    )
+    task = QueueTask(config, status="failed")
+    store = QueueStore(tmp_path / "queue.json")
+    store.save([task])
+
+    remaining = remove_queue_tasks([task], {task.task_id})
+    store.save(remaining)
+
+    assert store.load() == []
+    assert QueueStore(tmp_path / "queue.json").load() == []
+    assert database.get_history(config.task_id)["status"] == "failed"
+    assert output.exists() and image.exists()
+    assert database.find_hash_duplicate("hash-failed") is not None
 
 
 def test_clear_pending_keeps_completed_and_failed_tasks(tmp_path: Path) -> None:

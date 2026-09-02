@@ -5,7 +5,8 @@ from pathlib import Path
 
 from src.browser import ImageCandidate
 from src.models import TaskConfig, TaskStats
-from src.storage import CollectorDatabase
+from src.storage import CollectorDatabase, QueueStore
+from src.tasks import QueueTask
 
 
 def _candidate(url: str, platform: str = "pinterest", media_type: str = "image") -> ImageCandidate:
@@ -65,3 +66,67 @@ def test_running_history_is_marked_interrupted(tmp_path: Path) -> None:
     db.start_task(config, tmp_path / "cats_1")
     db.mark_running_interrupted()
     assert db.get_history(config.task_id)["status"] == "interrupted"
+
+
+def _seed_completed_history(db: CollectorDatabase, root: Path, name: str) -> tuple[TaskConfig, Path]:
+    config = TaskConfig(name, 1, root)
+    output = root / f"{name}-task"
+    output.mkdir()
+    db.start_task(config, output)
+    db.finish_task(config, TaskStats(downloaded=1), "completed", task_output_dir=output)
+    return config, output
+
+
+def test_delete_selected_history_is_transactional_and_survives_restart(tmp_path: Path) -> None:
+    db_path = tmp_path / "collector.db"
+    db = CollectorDatabase(db_path)
+    first, output = _seed_completed_history(db, tmp_path, "first")
+    second, _ = _seed_completed_history(db, tmp_path, "second")
+    image = output / "image.jpg"
+    image.write_bytes(b"image")
+
+    assert db.delete_task_history([first.task_id]) == 1
+    assert db.get_history(first.task_id) is None
+    assert db.get_history(second.task_id) is not None
+    assert image.exists()
+    assert CollectorDatabase(db_path).get_history(first.task_id) is None
+
+
+def test_delete_multiple_history_rows_in_one_operation(tmp_path: Path) -> None:
+    db = CollectorDatabase(tmp_path / "collector.db")
+    configs = [_seed_completed_history(db, tmp_path, name)[0] for name in ("one", "two", "three")]
+
+    assert db.delete_task_history(config.task_id for config in configs[:2]) == 2
+    assert [db.get_history(config.task_id) is not None for config in configs] == [False, False, True]
+
+
+def test_clear_history_preserves_media_index_files_and_queue(tmp_path: Path) -> None:
+    db = CollectorDatabase(tmp_path / "collector.db")
+    config, output = _seed_completed_history(db, tmp_path, "kept")
+    image = output / "image.jpg"
+    video = output / "video.mp4"
+    metadata = output / "metadata.csv"
+    image.write_bytes(b"image")
+    video.write_bytes(b"video")
+    metadata.write_text("metadata", encoding="utf-8")
+    candidate = _candidate("https://cdn.test/kept.jpg")
+    db.register_media(candidate, "kept", "hash-kept", image, config.task_id)
+    queue_store = QueueStore(tmp_path / "queue.json")
+    queue_task = QueueTask(TaskConfig("queued", 1, tmp_path))
+    queue_store.save([queue_task])
+
+    assert db.clear_task_history() == 1
+    assert db.list_history() == []
+    assert db.find_duplicate(candidate, "kept") is not None
+    assert image.exists() and video.exists() and metadata.exists() and output.exists()
+    assert [task.task_id for task in queue_store.load()] == [queue_task.task_id]
+
+
+def test_running_history_cannot_be_deleted_or_cleared(tmp_path: Path) -> None:
+    db = CollectorDatabase(tmp_path / "collector.db")
+    config = TaskConfig("running", 1, tmp_path)
+    db.start_task(config, tmp_path / "running-task")
+
+    assert db.delete_task_history([config.task_id]) == 0
+    assert db.clear_task_history() == 0
+    assert db.get_history(config.task_id)["status"] == "running"

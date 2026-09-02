@@ -36,6 +36,7 @@ class DownloadEngine:
         self.on_task_dir = on_task_dir
         self.database = database or CollectorDatabase(on_warning=on_log)
         self.browser_manager = browser_manager
+        self.on_control_status: Callable[[str], None] = lambda _status: None
         self.pause_event, self.stop_event = Event(), Event()
         self.pause_event.set()
         self.stats = TaskStats()
@@ -45,10 +46,12 @@ class DownloadEngine:
     def pause(self) -> None:
         self.pause_event.clear()
         self.database.update_task(self.config.task_id, status="paused")
+        self.on_control_status("paused")
 
     def resume(self) -> None:
         self.pause_event.set()
         self.database.update_task(self.config.task_id, status="running")
+        self.on_control_status("running")
 
     def stop(self) -> None:
         self.stop_event.set()

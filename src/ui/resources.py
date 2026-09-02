@@ -1,7 +1,11 @@
 from __future__ import annotations
 
+import ctypes
 import sys
 from pathlib import Path
+
+
+WINDOWS_APP_USER_MODEL_ID = "SocialMediaCollector.Desktop"
 
 
 def resource_path(relative_path: str) -> str:
@@ -18,6 +22,15 @@ def app_icon_path() -> str:
     else:
         base = Path(__file__).resolve().parents[2] / "assets"
     return str(base / "app_icon.ico")
+
+
+def set_windows_app_user_model_id() -> None:
+    """Give Windows a stable identity for taskbar grouping and the app icon."""
+    if sys.platform != "win32":
+        return
+    ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(
+        ctypes.c_wchar_p(WINDOWS_APP_USER_MODEL_ID)
+    )
 
 
 def stylesheet() -> str:

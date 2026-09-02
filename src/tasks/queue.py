@@ -35,7 +35,8 @@ class QueueTask:
         return self.config.canonical_source_value
 
 
-REMOVABLE_QUEUE_STATUSES = frozenset({"pending", "stopped"})
+REMOVABLE_QUEUE_STATUSES = frozenset({"pending", "failed", "stopped", "completed"})
+PROTECTED_QUEUE_STATUSES = frozenset({"running", "paused"})
 
 
 def remove_queue_tasks(tasks: list[QueueTask], task_ids: set[str]) -> list[QueueTask]:
@@ -45,8 +46,8 @@ def remove_queue_tasks(tasks: list[QueueTask], task_ids: set[str]) -> list[Queue
     slice assignment so a running QueueRunner keeps the same list object.
     """
     selected = [task for task in tasks if task.task_id in task_ids]
-    if any(task.status == "running" for task in selected):
-        raise ValueError("运行中的任务请先停止后再移除。")
+    if any(task.status in PROTECTED_QUEUE_STATUSES for task in selected):
+        raise ValueError("运行中或暂停中的任务请先停止，再从队列中删除。")
     if any(task.status not in REMOVABLE_QUEUE_STATUSES for task in selected):
         raise ValueError("只能删除等待或已停止的任务。")
     selected_ids = {task.task_id for task in selected}

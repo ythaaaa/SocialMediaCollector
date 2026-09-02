@@ -16,6 +16,7 @@ class QueueRunner(QThread):
     task_started = Signal(str)
     stats = Signal(object)
     log = Signal(str)
+    control_status = Signal(str)
     finished_queue = Signal()
 
     def __init__(self, tasks: list[QueueTask], profile_dir: Path, store: QueueStore, browser_manager: BrowserSessionManager | None = None) -> None:
@@ -88,6 +89,7 @@ class QueueRunner(QThread):
                     # fake engines used by tests and future integrations keep
                     # the original four-argument constructor contract.
                     self.current_engine.on_task_dir = lambda path: self.task_started.emit(str(path))
+                    self.current_engine.on_control_status = self.control_status.emit
                     self.current_engine.browser_manager = self.browser_manager
                     self.current_engine.run()
                     if self._stop_requested.is_set():
