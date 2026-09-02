@@ -37,6 +37,14 @@ class ImageCandidate:
     posted_at: str = ""
     fallback_urls: tuple[str, ...] = ()
     video_sources: tuple["PinterestVideoSource", ...] = ()
+    width: int | None = None
+    height: int | None = None
+    shortcode: str = ""
+    caption: str = ""
+    media_index: int = 0
+    thumbnail_url: str = ""
+    metadata_source: str = ""
+    source: str = ""
 
 
 @dataclass(frozen=True)

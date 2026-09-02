@@ -6,6 +6,7 @@ from typing import Any, Mapping
 from uuid import uuid4
 
 from src.utils.x import normalize_x_author
+from src.platforms import get_platform_spec
 
 
 TASK_STATUSES = frozenset({"pending", "running", "paused", "completed", "failed", "stopped", "interrupted"})
@@ -144,8 +145,8 @@ class TaskConfig:
     def validate(self) -> None:
         platform = self.canonical_platform()
         collection_mode = self.canonical_collection_mode()
-        supported_modes = {"search", "home", "current_page"} if platform == "pinterest" else {"author", "home", "search"} if platform == "x" else set()
-        if not supported_modes or collection_mode not in supported_modes:
+        spec = get_platform_spec(platform)
+        if spec is None or not spec.enabled or collection_mode not in spec.collection_modes:
             raise ValueError("unsupported collection mode")
         if self.status not in TASK_STATUSES:
             raise ValueError("任务状态无效")
@@ -163,6 +164,11 @@ class TaskConfig:
                 self.canonical_author()
             elif collection_mode == "search" and not self.source_value.strip():
                 raise ValueError("X 搜索关键词不能为空")
+        elif platform == "instagram":
+            if self.canonical_media_type() not in set(spec.media_types):
+                raise ValueError("Instagram 下载内容类型无效")
+            if not self.source_value.strip():
+                raise ValueError("Instagram 目标不能为空")
         elif self.canonical_media_type() not in {"image", "video", "mixed"}:
             raise ValueError("Pinterest 下载内容类型无效")
         if self.target_count < 1:
@@ -205,6 +211,12 @@ class DownloadRecord:
     prompt: str = ""
     posted_at: str = ""
     collected_at: str = ""
+    shortcode: str = ""
+    caption: str = ""
+    media_index: int = 0
+    thumbnail_url: str = ""
+    metadata_source: str = ""
+    source: str = ""
 
     def row(self) -> dict[str, Any]:
         return asdict(self)

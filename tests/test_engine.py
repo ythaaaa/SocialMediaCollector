@@ -1,6 +1,7 @@
 from pathlib import Path
 
 import httpx
+import pytest
 from PIL import Image
 
 from src.browser import ImageCandidate
@@ -194,6 +195,107 @@ def test_engine_reuses_managed_browser_and_records_current_page_url(tmp_path: Pa
     assert '"source_page_url": "https://www.pinterest.com/pin/123/"' in task_data
 
 
+def test_engine_routes_instagram_to_shared_collector_and_normalizes_config(tmp_path: Path, monkeypatch) -> None:
+    observed: dict[str, object] = {}
+
+    class Collector:
+        def __init__(self, profile_dir, log) -> None:
+            observed["profile_dir"] = profile_dir
+
+        def open(self) -> None:
+            observed["opened"] = True
+
+        def connect_over_cdp(self, endpoint: str) -> None:
+            observed["connected"] = endpoint == "http://127.0.0.1:9222"
+
+        def close(self) -> None:
+            observed["closed"] = True
+
+        def collect_author(self, *args):
+            observed["author_source"] = args[0]
+            return []
+
+    class Manager:
+        endpoint = "http://127.0.0.1:9222"
+
+        def is_login_running(self) -> bool:
+            return False
+
+        def is_running(self) -> bool:
+            return True
+
+    monkeypatch.setattr(engine_module, "InstagramCollector", Collector)
+    config = TaskConfig(
+        "",
+        1,
+        tmp_path,
+        platform="instagram",
+        collection_mode="author",
+        source_identifier="@alice",
+        media_type="mixed",
+        interval_seconds=0,
+    )
+
+    task_dir = DownloadEngine(
+        config,
+        tmp_path / "profile",
+        database=CollectorDatabase(tmp_path / "collector.db"),
+        browser_manager=Manager(),
+    ).run()
+
+    assert observed["connected"] is True
+    assert observed["closed"] is True
+    assert observed["author_source"] == "alice"
+    task_data = (task_dir / "task.json").read_text(encoding="utf-8")
+    assert '"source_page_url": "https://www.instagram.com/alice/"' in task_data
+
+
+def test_engine_rejects_instagram_without_manual_login_browser(tmp_path: Path) -> None:
+    config = TaskConfig(
+        "",
+        1,
+        tmp_path,
+        platform="instagram",
+        collection_mode="single_post",
+        source_identifier="https://www.instagram.com/p/ABC123/",
+        media_type="mixed",
+        interval_seconds=0,
+    )
+
+    with pytest.raises(RuntimeError, match="Instagram 尚未登录"):
+        DownloadEngine(config, tmp_path / "profile", database=CollectorDatabase(tmp_path / "collector.db")).run()
+
+
+def test_engine_rejects_instagram_while_manual_login_browser_is_running(tmp_path: Path) -> None:
+    class Manager:
+        endpoint = None
+
+        def is_login_running(self) -> bool:
+            return True
+
+        def is_running(self) -> bool:
+            return False
+
+    config = TaskConfig(
+        "",
+        1,
+        tmp_path,
+        platform="instagram",
+        collection_mode="single_post",
+        source_identifier="https://www.instagram.com/p/ABC123/",
+        media_type="mixed",
+        interval_seconds=0,
+    )
+
+    with pytest.raises(RuntimeError, match="登录浏览器仍在运行"):
+        DownloadEngine(
+            config,
+            tmp_path / "profile",
+            database=CollectorDatabase(tmp_path / "collector.db"),
+            browser_manager=Manager(),
+        ).run()
+
+
 def test_video_download_error_only_fails_current_candidate(tmp_path: Path, monkeypatch) -> None:
     config = TaskConfig(
         "",
@@ -234,3 +336,13 @@ def test_video_download_error_only_fails_current_candidate(tmp_path: Path, monke
     assert calls == 2
     assert engine.stats.failed == 1
     assert engine.stats.downloaded == 1
+
+
+def test_direct_video_request_preserves_signed_query_but_removes_range_controls() -> None:
+    url = "https://cdninstagram.com/clip.mp4?efg=signed%3D%3D&_nc_sig=opaque&bytestart=0&byteend=817"
+    request_url = DownloadEngine._direct_video_request_url(url)
+    assert request_url == "https://cdninstagram.com/clip.mp4?efg=signed%3D%3D&_nc_sig=opaque"
+    assert "efg=signed%3D%3D" in request_url
+    assert "_nc_sig=opaque" in request_url
+    assert "bytestart" not in request_url
+    assert "byteend" not in request_url

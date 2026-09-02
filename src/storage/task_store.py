@@ -16,7 +16,8 @@ class TaskStore:
         "collection_mode", "source_page_url", "platform", "author_username", "post_url",
         "only_author_content", "media_type", "media_url", "duration", "video_width",
         "video_height", "bitrate", "post_id", "post_text", "prompt_detected", "prompt",
-        "posted_at", "collected_at",
+        "posted_at", "collected_at", "shortcode", "caption", "media_index", "thumbnail_url",
+        "metadata_source", "source",
     ]
 
     def __init__(self, task_dir: Path, config: TaskConfig) -> None:
@@ -56,8 +57,17 @@ class TaskStore:
 
     def append(self, record: DownloadRecord) -> None:
         target = self.metadata_path if record.status == "downloaded" else self.failed_path
+        fieldnames = self._fieldnames(target)
         with target.open("a", newline="", encoding="utf-8-sig") as f:
-            csv.DictWriter(f, fieldnames=self.fields).writerow(record.row())
+            csv.DictWriter(f, fieldnames=fieldnames, extrasaction="ignore").writerow(record.row())
+
+    def _fieldnames(self, path: Path) -> list[str]:
+        try:
+            with path.open("r", newline="", encoding="utf-8-sig") as f:
+                header = next(csv.reader(f), [])
+        except (OSError, StopIteration):
+            return self.fields
+        return [field for field in self.fields if field in header] or self.fields
 
     def complete(self, stats: object, stopped: bool, error: str = "") -> None:
         path = self.task_dir / "task.json"

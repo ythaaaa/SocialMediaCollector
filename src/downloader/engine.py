@@ -9,11 +9,12 @@ from datetime import datetime
 from pathlib import Path
 from threading import Event
 from typing import Callable
+from urllib.parse import urlsplit, urlunsplit
 
 import httpx
 from PIL import Image, UnidentifiedImageError
 
-from src.browser import BrowserSessionManager, ImageCandidate, PinterestCollector, PinterestVideoSource, XCollector
+from src.browser import BrowserSessionManager, ImageCandidate, InstagramCollector, PinterestCollector, PinterestVideoSource, XCollector
 from src.models import DownloadRecord, TaskConfig, TaskStats
 from src.downloader.hls import HLSDownloadCancelled, HLSDownloadError, HLSDownloader
 from src.storage import CollectorDatabase, TaskStore
@@ -67,9 +68,27 @@ class DownloadEngine:
     def run(self) -> Path:
         platform = self.config.canonical_platform()
         mode = self.config.canonical_collection_mode()
+        if platform == "instagram":
+            if self.browser_manager is None:
+                raise RuntimeError("Instagram 尚未登录，请先点击『打开浏览器 / 登录』，在 Chrome 中完成登录后再开始采集。")
+            if self.browser_manager.is_login_running():
+                raise RuntimeError("Instagram 登录浏览器仍在运行。请完成登录并关闭该浏览器后，再开始采集。")
+            if not self.browser_manager.is_running():
+                self.browser_manager.open_collection_browser("https://www.instagram.com/")
         if mode == "current_page" and not (self.browser_manager and self.browser_manager.is_running()):
             raise RuntimeError("请先点击『打开浏览器 / 登录』，在 Pinterest 中打开需要采集的页面，然后开始下载。")
-        if platform == "x" and mode == "author":
+        if platform == "instagram" and mode == "author":
+            from src.browser.instagram_collector import normalize_author
+            username, _ = normalize_author(self.config.canonical_source_value)
+            self.config = replace(self.config, source_identifier=username, source_page_url=f"https://www.instagram.com/{username}/")
+            task_name = f"instagram_{username}"
+        elif platform == "instagram" and mode == "single_post":
+            from src.browser.instagram_collector import extract_shortcode
+            from src.browser.instagram_collector import normalize_single_post_url
+            post_url = normalize_single_post_url(self.config.canonical_source_value)
+            self.config = replace(self.config, source_identifier=post_url, source_page_url=post_url)
+            task_name = f"instagram_{extract_shortcode(post_url) or post_url}"
+        elif platform == "x" and mode == "author":
             username, _ = self.config.canonical_author()
             task_name = f"x_{username}"
         elif platform == "x" and mode == "search":
@@ -88,7 +107,12 @@ class DownloadEngine:
         self.task_dir = self.task_output_dir
         if self.on_task_dir:
             self.on_task_dir(self.task_output_dir)
-        collector = XCollector(self.profile_dir, self.on_log, self.task_output_dir) if platform == "x" else PinterestCollector(self.profile_dir, self.on_log)
+        if platform == "instagram":
+            collector = InstagramCollector(self.profile_dir, self.on_log)
+        elif platform == "x":
+            collector = XCollector(self.profile_dir, self.on_log, self.task_output_dir)
+        else:
+            collector = PinterestCollector(self.profile_dir, self.on_log)
         store: TaskStore | None = None
         try:
             self._emit("正在打开浏览器并收集图片")
@@ -105,7 +129,11 @@ class DownloadEngine:
             with httpx.Client(headers={"User-Agent": "Mozilla/5.0"}, follow_redirects=True, timeout=30) as client:
                 on_candidate = lambda candidate: self._process_candidate(client, candidate, store, known)
                 should_finish = lambda: self.stats.downloaded >= self.config.target_count
-                if platform == "x" and mode == "author":
+                if platform == "instagram" and mode == "author":
+                    candidates = collector.collect_author(self.config.canonical_source_value, self.config.target_count, self.config.max_scrolls, self.stop_event.is_set, self._wait_if_paused, self._on_found, on_candidate, should_finish, self.config.canonical_media_type())
+                elif platform == "instagram" and mode == "single_post":
+                    candidates = collector.collect_single_post(self.config.canonical_source_value, self.config.target_count, self.config.max_scrolls, self.stop_event.is_set, self._wait_if_paused, self._on_found, on_candidate, should_finish, self.config.canonical_media_type())
+                elif platform == "x" and mode == "author":
                     candidates = collector.collect_author(self.config.canonical_source_value, self.config.target_count, self.config.max_scrolls, self.config.only_author_content, self.stop_event.is_set, self._wait_if_paused, self._on_found, on_candidate, should_finish, self.config.canonical_media_type(), self.config.only_prompt_posts)
                 elif platform == "x" and mode == "search":
                     candidates = collector.collect_search(
@@ -237,6 +265,12 @@ class DownloadEngine:
             prompt=candidate.prompt,
             posted_at=candidate.posted_at,
             collected_at=datetime.now().isoformat(timespec="seconds"),
+            shortcode=candidate.shortcode,
+            caption=candidate.caption,
+            media_index=candidate.media_index,
+            thumbnail_url=candidate.thumbnail_url,
+            metadata_source=candidate.metadata_source,
+            source=candidate.source,
         )
         try:
             if candidate.media_type == "video":
@@ -248,7 +282,10 @@ class DownloadEngine:
             for download_url in download_urls:
                 for attempt in range(self.config.retry_count):
                     try:
-                        referer = "https://x.com/" if platform == "x" else "https://www.pinterest.com/"
+                        referer = {
+                            "x": "https://x.com/",
+                            "instagram": "https://www.instagram.com/",
+                        }.get(platform, "https://www.pinterest.com/")
                         response = client.get(download_url, headers={"Referer": referer})
                         response.raise_for_status()
                         content = response.content
@@ -314,9 +351,15 @@ class DownloadEngine:
         selected_source = None
         last_error: Exception | None = None
         try:
-            is_x = self.config.canonical_platform() == "x"
-            stage_label = "Media视频阶段" if is_x else "Pinterest视频阶段"
-            referer = "https://x.com/" if is_x else "https://www.pinterest.com/"
+            platform = self.config.canonical_platform()
+            stage_label = {
+                "x": "Media视频阶段",
+                "instagram": "Instagram视频阶段",
+            }.get(platform, "Pinterest视频阶段")
+            referer = {
+                "x": "https://x.com/",
+                "instagram": "https://www.instagram.com/",
+            }.get(platform, "https://www.pinterest.com/")
             for source in sources:
                 if self.stop_event.is_set():
                     raise HLSDownloadCancelled()
@@ -340,7 +383,7 @@ class DownloadEngine:
                     last_error = exc
                     if part_path.exists():
                         part_path.unlink()
-                    self.on_log(f"Pinterest视频候选失败，将继续后续来源：{source.url} - {exc}")
+                    self.on_log(f"{stage_label}候选失败，将继续后续来源：{self._safe_media_url(source.url)} - {exc}")
             if result is None or selected_source is None:
                 raise last_error or HLSDownloadError("Pinterest 视频没有可用下载来源。")
             if self.stop_event.is_set():
@@ -387,7 +430,8 @@ class DownloadEngine:
                 part_path.unlink()
 
     def _download_direct_video(self, client: httpx.Client, url: str, output_path: Path, source: PinterestVideoSource, referer: str):
-        with client.stream("GET", url, headers={"Referer": referer, "User-Agent": "Mozilla/5.0"}) as response:
+        request_url = self._direct_video_request_url(url)
+        with client.stream("GET", request_url, headers={"Referer": referer, "User-Agent": "Mozilla/5.0"}) as response:
             response.raise_for_status()
             with output_path.open("wb") as handle:
                 for chunk in response.iter_bytes(1024 * 1024):
@@ -401,6 +445,22 @@ class DownloadEngine:
             raise HLSDownloadError("Pinterest MP4 文件为空或不完整。")
         from src.downloader.hls import HLSResult
         return HLSResult(source.duration, source.width, source.height, source.bitrate)
+
+    @staticmethod
+    def _direct_video_request_url(url: str) -> str:
+        """Remove only transport range controls; preserve signed CDN query data."""
+        parsed = urlsplit(url)
+        query_parts = [
+            part for part in parsed.query.split("&")
+            if part and part.split("=", 1)[0].casefold() not in {"bytestart", "byteend"}
+        ]
+        return urlunsplit((parsed.scheme, parsed.netloc, parsed.path, "&".join(query_parts), parsed.fragment))
+
+    @staticmethod
+    def _safe_media_url(url: str) -> str:
+        parsed = urlsplit(url)
+        safe = urlunsplit((parsed.scheme, parsed.netloc, parsed.path, "", ""))
+        return safe[:180] + ("…" if len(safe) > 180 else "")
 
     @staticmethod
     def _file_hash(path: Path) -> str:

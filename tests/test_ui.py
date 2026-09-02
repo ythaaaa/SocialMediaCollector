@@ -111,24 +111,55 @@ def test_x_search_scope_still_writes_task_config(window: MainWindow) -> None:
     assert config.canonical_search_scope() == "top"
 
 
-def test_platform_combo_uses_registry_icons_and_disables_reserved_platforms(window: MainWindow) -> None:
+def test_instagram_form_exposes_author_and_single_post_without_x_controls(window: MainWindow) -> None:
+    window.platform.setCurrentIndex(2)
+    assert window.platform.currentData() == "instagram"
+    assert not window.search_scope_field.isVisible()
+    assert not window.only_prompt.isVisible()
+
+    window.keyword.setText("@alice")
+    author = window._task_config_from_form()
+    assert author.platform == "instagram"
+    assert author.collection_mode == "author"
+    assert author.source_identifier == "@alice"
+    assert author.media_type == "mixed"
+
+    window.mode.setCurrentIndex(1)
+    assert window.source_label.text() == "Instagram 帖子 / Reel 链接"
+    assert window.search_scope_field.isHidden()
+    window.keyword.setText("https://www.instagram.com/p/ABC123/")
+    post = window._task_config_from_form()
+    assert post.collection_mode == "single_post"
+    assert post.source_identifier.endswith("ABC123/")
+
+
+def test_platform_combo_uses_registry_icons_and_disables_youtube(window: MainWindow) -> None:
     assert window.platform.count() == 4
     assert [window.platform.itemData(i) for i in range(window.platform.count())] == [
         "pinterest", "x", "instagram", "youtube",
     ]
     assert all(not window.platform.itemIcon(i).isNull() for i in range(window.platform.count()))
 
-    for index in (2, 3):
+    youtube_item = window.platform.model().item(3)
+    assert youtube_item is not None
+    assert not (youtube_item.flags() & Qt.ItemFlag.ItemIsEnabled)
+
+    instagram_item = window.platform.model().item(2)
+    assert instagram_item is not None
+    assert instagram_item.flags() & Qt.ItemFlag.ItemIsEnabled
+
+    for index in (0, 1, 2):
         item = window.platform.model().item(index)
         assert item is not None
-        assert not (item.flags() & Qt.ItemFlag.ItemIsEnabled)
+        assert item.flags() & Qt.ItemFlag.ItemIsEnabled
 
     window.platform.setCurrentIndex(2)
     assert window.platform.currentData() == "instagram"
     assert [window.mode.itemData(i) for i in range(window.mode.count())] == ["author", "single_post"]
     assert [window.media_type.itemData(i) for i in range(window.media_type.count())] == ["image", "video", "mixed"]
-    assert not window.start.isEnabled()
-    assert "开发中" in window.mode_hint.text()
+    assert window.start.isEnabled()
+    assert window.media_type.currentData() == "mixed"
+    assert "Instagram" in window.mode_hint.text()
 
 
 def test_reserved_platform_cannot_start_task(window: MainWindow, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -143,7 +174,7 @@ def test_reserved_platform_cannot_start_task(window: MainWindow, monkeypatch: py
         "",
         1,
         Path(window.database.path).parent,
-        platform="instagram",
+        platform="youtube",
         collection_mode="author",
         source_identifier="future-account",
     )

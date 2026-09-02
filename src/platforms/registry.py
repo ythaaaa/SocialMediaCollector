@@ -1,8 +1,7 @@
 """Declarative platform capabilities used by the desktop UI.
 
-Collectors remain platform-specific for now.  This registry only describes
-the capabilities that can be presented by the UI and the future platforms
-that are intentionally disabled during the V2.1 foundation phase.
+Collectors remain platform-specific for now. This registry describes the
+capabilities presented by the UI and the platforms available to the engine.
 """
 
 from dataclasses import dataclass
@@ -62,13 +61,13 @@ PLATFORM_REGISTRY: dict[str, PlatformSpec] = {
     ),
     "instagram": PlatformSpec(
         key="instagram",
-        label="Instagram · 开发中",
+        label="Instagram",
         icon="icons/platforms/instagram.svg",
-        enabled=False,
+        enabled=True,
         collection_modes=("author", "single_post"),
         media_types=("image", "video", "mixed"),
         default_mode="author",
-        default_media_type="image",
+        default_media_type="mixed",
     ),
     "youtube": PlatformSpec(
         key="youtube",

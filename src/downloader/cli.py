@@ -5,7 +5,7 @@ from pathlib import Path
 
 from src.downloader import DownloadEngine
 from src.models import TaskConfig
-from src.utils.paths import browser_profile_directory
+from src.utils.paths import profile_directory_for_platform
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Social Media Asset Collector")
@@ -33,7 +33,7 @@ def main() -> None:
         media_type=args.media_type if args.platform == "x" else "image",
         search_scope=args.search_scope if args.platform == "x" and args.mode == "search" else "media",
     )
-    engine = DownloadEngine(config, browser_profile_directory(), print)
+    engine = DownloadEngine(config, profile_directory_for_platform(config.canonical_platform()), print)
     task_dir = engine.run()
     print(f"任务目录：{task_dir}")
 

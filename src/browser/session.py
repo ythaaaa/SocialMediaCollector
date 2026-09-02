@@ -30,6 +30,21 @@ def regular_chrome_login_command(chrome_path: str, profile_dir: Path, target_url
     return [chrome_path, f"--user-data-dir={Path(profile_dir)}", target_url]
 
 
+def managed_chrome_command(chrome_path: str, profile_dir: Path, port: int, target_url: str) -> list[str]:
+    """Build the normal Chrome command that can later be attached to over CDP.
+
+    The browser is still launched directly by the operating system.  No
+    Playwright automation flags, login actions, or credential handling are
+    added to this command.
+    """
+    command = regular_chrome_login_command(chrome_path, profile_dir, target_url)
+    command[1:1] = [
+        f"--remote-debugging-port={port}",
+        "--remote-debugging-address=127.0.0.1",
+    ]
+    return command
+
+
 class BrowserSession:
     """Own one visible, persistent Playwright browser profile."""
 
@@ -135,13 +150,20 @@ class BrowserSession:
 
 
 class BrowserSessionManager:
-    """Own the app-launched Chrome and expose one reusable profile endpoint."""
+    """Own the app-launched Chrome processes and one reusable profile.
+
+    Instagram has an intentionally separate lifecycle: its login process is
+    ordinary headed Chrome with no debugging endpoint, while its collection
+    process is started later with CDP enabled.
+    """
 
     def __init__(self, profile_dir: Path, log: Callable[[str], None]) -> None:
         self.profile_dir = Path(profile_dir)
         self.log = log
-        self.process: subprocess.Popen[bytes] | None = None
+        self.login_process: subprocess.Popen[bytes] | None = None
+        self.collection_process: subprocess.Popen[bytes] | None = None
         self.port: int | None = None
+        self.chrome_path: str | None = None
 
     @staticmethod
     def _free_port() -> int:
@@ -164,40 +186,94 @@ class BrowserSessionManager:
             return False
 
     def is_running(self) -> bool:
-        if self.process and self.process.poll() is not None:
-            self.process = None
+        """Return whether the CDP-enabled collection Chrome is running."""
+        if self.collection_process and self.collection_process.poll() is not None:
+            self.collection_process = None
             self.port = None
             return False
-        return bool(self.process and self._endpoint_ready())
+        return bool(self.collection_process and self._endpoint_ready())
 
-    def open_browser(self, target_url: str) -> None:
-        if self.is_running():
+    def is_login_running(self) -> bool:
+        if self.login_process and self.login_process.poll() is not None:
+            self.login_process = None
+            return False
+        return bool(self.login_process)
+
+    def set_profile_dir(self, profile_dir: Path) -> None:
+        """Select a profile only while this manager owns no live Chrome."""
+        target = Path(profile_dir)
+        if target == self.profile_dir:
             return
+        if self.is_login_running() or self.is_running():
+            raise RuntimeError("当前浏览器仍在运行，不能切换浏览器 Profile。")
+        self.profile_dir = target
+
+    def open_manual_login_browser(self, target_url: str) -> None:
+        """Open the app-owned profile in ordinary system Chrome for human login.
+
+        This method deliberately has no CDP flags and does not create a
+        Playwright object.  The user owns the entire login interaction.
+        """
+        if self.is_login_running():
+            self.log("Instagram 登录 Chrome 已在运行，继续使用当前 Profile。")
+            return
+        if self.is_running():
+            raise RuntimeError("采集浏览器正在运行，请先结束当前任务后再打开 Instagram 登录浏览器。")
         chrome_path = find_chrome_path()
         if not chrome_path:
             raise RuntimeError("未找到本机 Google Chrome，无法打开托管浏览器。")
         if BrowserSession.profile_is_locked(self.profile_dir):
             raise RuntimeError("请先关闭当前占用专用 Profile 的浏览器，再重试。")
         self.profile_dir.mkdir(parents=True, exist_ok=True)
+        self.chrome_path = chrome_path
+        command = regular_chrome_login_command(chrome_path, self.profile_dir, target_url)
+        self.log(f"人工登录 Chrome 启动参数（无 CDP）：{subprocess.list2cmdline(command)}")
+        self.login_process = subprocess.Popen(command, cwd=str(Path(chrome_path).parent))
+        deadline = time.monotonic() + 3
+        while time.monotonic() < deadline:
+            if self.login_process.poll() is not None:
+                self.login_process = None
+                raise RuntimeError("人工登录 Chrome 启动后立即退出。")
+            time.sleep(0.2)
+        self.log(f"人工登录 Chrome 已打开：{chrome_path}；请人工完成 Instagram 登录后关闭该 Chrome。")
+
+    def open_manual_browser(self, target_url: str) -> None:
+        """Compatibility alias for callers that already request manual Chrome."""
+        self.open_manual_login_browser(target_url)
+
+    def open_collection_browser(self, target_url: str) -> None:
+        """Start the same profile in CDP-enabled Chrome for collection only."""
+        if self.is_running():
+            return
+        if self.is_login_running():
+            raise RuntimeError("Instagram 登录浏览器仍在运行。请完成登录并关闭该浏览器后，再开始采集。")
+        chrome_path = find_chrome_path()
+        if not chrome_path:
+            raise RuntimeError("未找到本机 Google Chrome，无法启动采集浏览器。")
+        if BrowserSession.profile_is_locked(self.profile_dir):
+            raise RuntimeError("请先关闭当前占用专用 Profile 的浏览器，再开始采集。")
+        self.profile_dir.mkdir(parents=True, exist_ok=True)
         self.port = self._free_port()
-        command = [
-            chrome_path,
-            f"--user-data-dir={self.profile_dir}",
-            f"--remote-debugging-port={self.port}",
-            "--remote-debugging-address=127.0.0.1",
-            target_url,
-        ]
-        self.process = subprocess.Popen(command, cwd=str(Path(chrome_path).parent))
+        self.chrome_path = chrome_path
+        command = managed_chrome_command(chrome_path, self.profile_dir, self.port, target_url)
+        self.log(f"采集 Chrome 启动参数（仅采集阶段启用 CDP）：{subprocess.list2cmdline(command)}")
+        self.collection_process = subprocess.Popen(command, cwd=str(Path(chrome_path).parent))
         deadline = time.monotonic() + 12
         while time.monotonic() < deadline:
-            if self.process.poll() is not None:
-                raise RuntimeError("托管 Chrome 启动后立即退出。")
+            if self.collection_process.poll() is not None:
+                self.collection_process = None
+                self.port = None
+                raise RuntimeError("采集 Chrome 启动后立即退出。")
             if self._endpoint_ready():
-                self.log(f"托管 Chrome 已打开：{chrome_path}；请人工登录并导航到目标页面。")
+                self.log(f"采集 Chrome 已打开：{chrome_path}；现在才连接 CDP/Playwright。")
                 return
             time.sleep(0.2)
         self.close()
-        raise RuntimeError("托管 Chrome 启动超时，请检查 Chrome 或专用 Profile 状态。")
+        raise RuntimeError("采集 Chrome 启动超时，请检查 Chrome 或专用 Profile 状态。")
+
+    def open_browser(self, target_url: str) -> None:
+        """Backward-compatible CDP browser entry point for Pinterest/X."""
+        self.open_collection_browser(target_url)
 
     def connect_session(self, log: Callable[[str], None] | None = None) -> BrowserSession | None:
         if not self.is_running() or not self.endpoint:
@@ -216,12 +292,16 @@ class BrowserSessionManager:
             session.close()
 
     def close(self) -> None:
-        process = self.process
-        self.process = None
+        login_process = self.login_process
+        collection_process = self.collection_process
+        self.login_process = None
+        self.collection_process = None
         self.port = None
-        if process and process.poll() is None:
-            process.terminate()
-            try:
-                process.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                process.kill()
+        self.chrome_path = None
+        for process in (login_process, collection_process):
+            if process and process.poll() is None:
+                process.terminate()
+                try:
+                    process.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    process.kill()

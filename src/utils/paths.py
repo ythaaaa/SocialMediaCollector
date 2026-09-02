@@ -32,3 +32,15 @@ def browser_profile_directory() -> Path:
     directory = application_data_directory() / "browser-data"
     directory.mkdir(parents=True, exist_ok=True)
     return directory
+
+
+def instagram_browser_profile_directory() -> Path:
+    """Return Instagram's separate persistent profile without copying data."""
+    return application_data_directory() / "browser-data-instagram"
+
+
+def profile_directory_for_platform(platform: str) -> Path:
+    """Route each platform to its stable app-owned browser profile."""
+    if (platform or "").strip().lower() == "instagram":
+        return instagram_browser_profile_directory()
+    return browser_profile_directory()

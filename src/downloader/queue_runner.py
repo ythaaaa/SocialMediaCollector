@@ -9,6 +9,7 @@ from src.browser import BrowserSessionManager
 from src.downloader.engine import DownloadEngine
 from src.storage import QueueStore
 from src.tasks import QueueTask
+from src.utils.paths import profile_directory_for_platform
 
 
 class QueueRunner(QThread):
@@ -84,7 +85,10 @@ class QueueRunner(QThread):
                 self._set_status(task, "running")
                 self.current_task = task
                 try:
-                    self.current_engine = DownloadEngine(task.config, self.profile_dir, self.log.emit, self.stats.emit)
+                    task_profile = profile_directory_for_platform(task.config.canonical_platform())
+                    if self.browser_manager:
+                        self.browser_manager.set_profile_dir(task_profile)
+                    self.current_engine = DownloadEngine(task.config, task_profile, self.log.emit, self.stats.emit)
                     # Attach the callback after construction so lightweight
                     # fake engines used by tests and future integrations keep
                     # the original four-argument constructor contract.

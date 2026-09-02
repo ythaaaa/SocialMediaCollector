@@ -27,7 +27,7 @@ from src.storage import CollectorDatabase, QueueStore
 from src.tasks import BatchInputError, QueueTask, build_batch_configs, remove_queue_tasks
 from src.ui.input_state import ModeInputState
 from src.ui.resources import app_icon_path, resource_path, set_windows_app_user_model_id, stylesheet
-from src.utils.paths import browser_profile_directory
+from src.utils.paths import browser_profile_directory, profile_directory_for_platform
 from src.version import APP_VERSION
 
 
@@ -79,17 +79,25 @@ class ChromeLoginWorker(QThread):
     log = Signal(str)
     failed = Signal(str)
 
-    def __init__(self, browser_manager: BrowserSessionManager, target_url: str) -> None:
+    def __init__(self, browser_manager: BrowserSessionManager, target_url: str, platform: str) -> None:
         super().__init__()
         self.browser_manager = browser_manager
         self.target_url = target_url
+        self.platform = platform
 
     def run(self) -> None:
         try:
-            self.browser_manager.open_browser(self.target_url)
-            self.log.emit("请在托管浏览器中人工登录 Pinterest / X，并导航到要采集的页面。")
+            if self.platform == "instagram":
+                self.browser_manager.open_manual_login_browser(self.target_url)
+            else:
+                self.browser_manager.open_browser(self.target_url)
+            if self.platform == "instagram":
+                self.log.emit("请在 Chrome 中完成 Instagram 登录。登录成功后请关闭该 Chrome 窗口，再返回采集器开始采集。程序不会操作登录页面。")
+            else:
+                self.log.emit("请在托管浏览器中人工登录 Pinterest / X，并导航到要采集的页面。")
             while not self.isInterruptionRequested():
-                if not self.browser_manager.is_running():
+                running = self.browser_manager.is_login_running() if self.platform == "instagram" else self.browser_manager.is_running()
+                if not running:
                     break
                 time.sleep(0.5)
         except Exception as exc:
@@ -621,15 +629,12 @@ class MainWindow(QMainWindow):
         self.mode.setCurrentIndex(default_mode if default_mode >= 0 else 0)
         self.mode.blockSignals(False)
 
-        previous_media_type = self.media_type.currentData()
         self.media_type.blockSignals(True)
         self.media_type.clear()
         for media_type in spec.media_types:
             self.media_type.addItem(media_type_label(media_type), media_type)
-        restored_media_type = self.media_type.findData(previous_media_type)
-        if restored_media_type < 0:
-            restored_media_type = self.media_type.findData(spec.default_media_type)
-        self.media_type.setCurrentIndex(restored_media_type if restored_media_type >= 0 else 0)
+        default_media_type = self.media_type.findData(spec.default_media_type)
+        self.media_type.setCurrentIndex(default_media_type if default_media_type >= 0 else 0)
         self.media_type.blockSignals(False)
 
     def _show_development_platform(self, spec) -> None:
@@ -685,6 +690,29 @@ class MainWindow(QMainWindow):
             self._show_development_platform(spec)
             return
         self._set_platform_controls_enabled(True)
+        if platform == "instagram":
+            author_mode = mode == "author"
+            self.source_label.setText("作者用户名 / 主页地址" if author_mode else "Instagram 帖子 / Reel 链接")
+            self.source_label.setVisible(True)
+            self.keyword.setVisible(True)
+            self.keyword.setEnabled(True)
+            self.keyword.setPlaceholderText(
+                "username、@username 或 Instagram 作者主页地址" if author_mode
+                else "https://www.instagram.com/p/.../ 或 /reel/.../"
+            )
+            self.mode_hint.setText(
+                "从 Instagram 作者主页发现帖子和 Reels。" if author_mode
+                else "只处理指定的 Instagram 图片帖、轮播帖或 Reel。"
+            )
+            self.only_author.setVisible(False)
+            self.only_prompt.setVisible(False)
+            self.media_type_label.setVisible(True)
+            self.media_type.setVisible(True)
+            self.search_scope_label.setVisible(False)
+            self.search_scope.setVisible(False)
+            self.search_scope_field.setVisible(False)
+            self._update_batch_controls()
+            return
         if platform == "x":
             author_mode = mode == "author"
             search_mode = mode == "search"
@@ -836,8 +864,8 @@ class MainWindow(QMainWindow):
             interval_seconds=self.interval.value(),
             collection_mode=mode,
             platform=platform,
-            source_identifier=source_text if platform == "x" and mode in {"author", "search"} else "",
-            only_author_content=self.only_author.isChecked() if mode == "author" else False,
+            source_identifier=source_text if platform in {"x", "instagram"} and mode in {"author", "search", "single_post"} else "",
+            only_author_content=self.only_author.isChecked() if platform == "x" and mode == "author" else False,
             media_type=str(self.media_type.currentData()),
             search_scope=str(self.search_scope.currentData()) if platform == "x" and mode == "search" else "media",
             only_prompt_posts=self.only_prompt.isChecked() if platform == "x" else False,
@@ -1119,7 +1147,19 @@ class MainWindow(QMainWindow):
                 QMessageBox.warning(self, "无法开始", "该平台正在开发中，当前版本暂不支持实际采集。")
                 return
             config.validate()
-            profile = browser_profile_directory()
+            profile = profile_directory_for_platform(config.canonical_platform())
+            try:
+                self.browser_manager.set_profile_dir(profile)
+            except RuntimeError as exc:
+                QMessageBox.warning(self, "无法切换浏览器 Profile", str(exc))
+                return
+            if config.canonical_platform() == "instagram" and self.browser_manager.is_login_running():
+                QMessageBox.warning(
+                    self,
+                    "无法开始",
+                    "Instagram 登录浏览器仍在运行。请完成登录并关闭该浏览器后，再开始采集。",
+                )
+                return
             if config.canonical_collection_mode() == "current_page" and not self.browser_manager.is_running():
                 QMessageBox.warning(self, "无法开始", "请先点击『打开浏览器 / 登录』，在 Pinterest 中打开需要采集的页面，然后开始下载。")
                 return
@@ -1144,13 +1184,23 @@ class MainWindow(QMainWindow):
     def open_login_browser(self) -> None:
         if self.login_worker and self.login_worker.isRunning():
             return
-        target_url = "https://www.pinterest.com/" if self.platform.currentData() == "pinterest" else "https://x.com/i/flow/login"
-        self.login_worker = ChromeLoginWorker(self.browser_manager, target_url)
+        target_url = {
+            "pinterest": "https://www.pinterest.com/",
+            "x": "https://x.com/i/flow/login",
+            "instagram": "https://www.instagram.com/",
+        }.get(str(self.platform.currentData()), "https://www.pinterest.com/")
+        platform = str(self.platform.currentData() or "")
+        try:
+            self.browser_manager.set_profile_dir(profile_directory_for_platform(platform))
+        except RuntimeError as exc:
+            QMessageBox.warning(self, "无法打开登录浏览器", str(exc))
+            return
+        self.login_worker = ChromeLoginWorker(self.browser_manager, target_url, platform)
         self.login_worker.log.connect(self.append_log)
         self.login_worker.failed.connect(lambda message: self.append_log(f"登录浏览器异常：{message}"))
         self.login_worker.finished.connect(lambda: self.login_browser.setEnabled(True))
         self.login_browser.setEnabled(False)
-        self.append_log("正在打开采集器专用浏览器……")
+        self.append_log("正在打开采集器专用 Chrome（仅人工登录）……")
         self.login_worker.start()
 
     def pause_task(self) -> None:
