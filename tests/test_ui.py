@@ -51,6 +51,36 @@ def _source_grid(window: MainWindow):
     raise AssertionError("采集来源卡片未找到")
 
 
+def _new_task_card_titles(window: MainWindow) -> list[str]:
+    page = window.tabs.widget(0)
+    assert page is not None
+    content = page.widget()
+    assert content is not None and content.layout() is not None
+    titles: list[str] = []
+    for index in range(content.layout().count()):
+        widget = content.layout().itemAt(index).widget()
+        if widget is None:
+            continue
+        title = next((label.text() for label in widget.findChildren(QLabel) if label.objectName() == "cardTitle"), "")
+        if title:
+            titles.append(title)
+    return titles
+
+
+def test_new_task_cards_follow_the_requested_vertical_order(window: MainWindow) -> None:
+    assert _new_task_card_titles(window) == [
+        "采集来源", "下载设置", "高级筛选", "目标内容", "操作", "下载进度", "实时记录",
+    ]
+    assert window.advanced_panel.isHidden()
+
+    window.advanced_toggle.setChecked(True)
+    window._toggle_advanced(True)
+    assert not window.advanced_panel.isHidden()
+    window.advanced_toggle.setChecked(False)
+    window._toggle_advanced(False)
+    assert window.advanced_panel.isHidden()
+
+
 def test_source_card_always_has_three_fields_and_search_scope_moves_to_target(window: MainWindow) -> None:
     assert _source_grid(window).count() == 3
 
