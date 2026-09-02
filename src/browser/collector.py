@@ -55,6 +55,16 @@ class PinterestVideoSource:
     duration: float | None = None
     bitrate: int | None = None
     kind: str = "mp4"
+    representation_id: str = ""
+    codec: str = ""
+    mime_type: str = ""
+    frame_rate: str = ""
+    sample_rate: int | None = None
+    channels: int | None = None
+    audio_url: str = ""
+    audio_codec: str = ""
+    audio_bitrate: int | None = None
+    container: str = ""
 
 
 class PinterestCollector(BrowserSession):

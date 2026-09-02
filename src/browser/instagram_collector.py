@@ -1,9 +1,10 @@
 from __future__ import annotations
 
+import base64
 import json
 import re
 import time
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
@@ -13,6 +14,7 @@ from playwright.sync_api import Error as PlaywrightError, Page
 
 from src.browser.collector import ImageCandidate, PinterestVideoSource
 from src.browser.session import BrowserSession
+from src.downloader.dash import DASHParseError, parse_mpd, quality_key, select_best_audio, select_best_video
 
 
 INSTAGRAM_HOSTS = {"instagram.com", "www.instagram.com"}
@@ -33,6 +35,7 @@ class InstagramMedia:
     bitrate: int | None = None
     thumbnail_url: str = ""
     source: str = ""
+    video_sources: tuple[PinterestVideoSource, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -956,7 +959,7 @@ class InstagramCollector(BrowserSession):
 
         for payload in payloads:
             walk(payload)
-        return [InstagramMedia(**{**asdict(item), "media_index": index}) for index, item in enumerate(result)]
+        return [replace(item, media_index=index) for index, item in enumerate(result)]
 
     @classmethod
     def _media_from_node(cls, node: dict[str, Any], index: int) -> InstagramMedia | None:
@@ -981,37 +984,81 @@ class InstagramCollector(BrowserSession):
         )
         if is_video:
             variants = node.get("video_versions") or node.get("video_resources") or []
-            chosen = cls._best_variant(variants)
+            if isinstance(variants, dict):
+                variants = variants.get("candidates") or variants.get("resources") or []
+            direct_sources: list[PinterestVideoSource] = []
+            aspect_width = _positive_int(node.get("original_width") or node.get("width"))
+            aspect_height = _positive_int(node.get("original_height") or node.get("height"))
+            for variant in variants if isinstance(variants, list) else []:
+                if not isinstance(variant, dict):
+                    continue
+                variant_url = str(variant.get("url") or variant.get("src") or "")
+                if not variant_url.startswith(("http://", "https://")) or variant_url.startswith("blob:"):
+                    continue
+                width, height = cls._video_variant_dimensions(variant, aspect_width, aspect_height)
+                if width and not height and aspect_width and aspect_height:
+                    height = round(width * aspect_height / aspect_width)
+                direct_sources.append(PinterestVideoSource(
+                    variant_url, width or aspect_width, height or aspect_height,
+                    _float_value(variant.get("duration") or node.get("video_duration") or node.get("duration")),
+                    _positive_int(variant.get("bitrate") or variant.get("bandwidth")), "mp4",
+                    codec=str(variant.get("codecs") or variant.get("codec") or ""),
+                    mime_type=str(variant.get("mime_type") or "video/mp4"), container="mp4",
+                ))
             direct_url = node.get("video_url") or node.get("contentUrl")
-            url = str(direct_url or (chosen or {}).get("url") or "")
+            if isinstance(direct_url, str) and direct_url.startswith(("http://", "https://")):
+                direct_width, direct_height = next(
+                    ((item.width, item.height) for item in direct_sources if item.width or item.height),
+                    (aspect_width, aspect_height),
+                )
+                direct_sources.insert(0, PinterestVideoSource(
+                    direct_url, direct_width, direct_height,
+                    _float_value(node.get("video_duration") or node.get("duration")),
+                    _positive_int(node.get("bitrate")), "mp4", mime_type="video/mp4", container="mp4",
+                ))
             manifest = str(node.get("video_dash_manifest") or node.get("dash_manifest") or "")
             hls = str(node.get("video_hls_manifest") or node.get("hls_manifest") or "")
+            dash_sources: list[PinterestVideoSource] = []
             if manifest:
-                # Keep the source type available to diagnostics without treating a manifest as a downloadable poster.
-                url = url or ""
-            if hls:
-                url = url or ""
-            if url.startswith("blob:"):
-                url = ""
-            if url:
-                source = "direct_mp4"
-            elif manifest:
-                source = "DASH"
-            elif hls:
-                source = "HLS"
-            else:
-                source = "video_without_direct_url"
+                try:
+                    parsed_manifest = parse_mpd(manifest)
+                    best_audio = select_best_audio(parsed_manifest.audio)
+                    for representation in sorted(parsed_manifest.video, key=quality_key, reverse=True):
+                        dash_sources.append(PinterestVideoSource(
+                            representation.base_url, representation.width, representation.height,
+                            representation.duration or parsed_manifest.duration, representation.bandwidth, "dash",
+                            representation.representation_id, representation.codec, representation.mime_type,
+                            representation.frame_rate, representation.sample_rate, representation.channels,
+                            best_audio.base_url if best_audio else "",
+                            best_audio.codec if best_audio else "", best_audio.bandwidth if best_audio else None,
+                            "mp4",
+                        ))
+                except DASHParseError:
+                    pass
+            sources = direct_sources + dash_sources
+            if hls and not sources:
+                hls_url = hls if hls.startswith(("http://", "https://")) else ""
+                if hls_url:
+                    sources.append(PinterestVideoSource(hls_url, aspect_width, aspect_height, _float_value(node.get("duration")), None, "hls"))
+            chosen_source = max(
+                enumerate(sources),
+                key=lambda item: (quality_key(item[1]), 1 if item[1].kind == "mp4" else 0, -item[0]),
+                default=None,
+            )
+            if not chosen_source:
+                return None
+            chosen = chosen_source[1]
+            ordered_sources = [chosen] + [source for source in sources if source is not chosen]
+            source = "DASH" if chosen.kind == "dash" else ("HLS" if chosen.kind == "hls" else "direct_mp4")
             return InstagramMedia(
                 index,
                 "video",
-                url,
-                _positive_int((chosen or {}).get("width")) or _positive_int(node.get("width")) or _positive_int(node.get("original_width")),
-                _positive_int((chosen or {}).get("height")) or _positive_int(node.get("height")) or _positive_int(node.get("original_height")),
-                _float_value(node.get("video_duration") or node.get("duration") or (chosen or {}).get("duration")),
-                _positive_int((chosen or {}).get("bitrate")),
+                chosen.url,
+                chosen.width, chosen.height, chosen.duration, chosen.bitrate,
                 str(node.get("thumbnail_src") or node.get("display_url") or ""),
                 source,
-            ) if url else None
+                tuple(ordered_sources),
+            )
 
         if not any(key in node for key in ("display_url", "display_resources", "thumbnail_resources", "image_versions2", "image_versions", "contentUrl", "image")):
             return None
@@ -1073,6 +1120,25 @@ class InstagramCollector(BrowserSession):
             default=None,
         )
 
+    @staticmethod
+    def _video_variant_dimensions(variant: dict[str, Any], aspect_width: int | None, aspect_height: int | None) -> tuple[int | None, int | None]:
+        width = _positive_int(variant.get("width") or variant.get("w"))
+        height = _positive_int(variant.get("height") or variant.get("h"))
+        encoded = variant.get("efg")
+        if not width and isinstance(encoded, str):
+            try:
+                padded = encoded + ("=" * (-len(encoded) % 4))
+                decoded = base64.urlsafe_b64decode(padded).decode("utf-8")
+                value = json.loads(decoded)
+                tag = str(value.get("vencode_tag") or "") if isinstance(value, dict) else ""
+                match = re.search(r"(?:^|\.)(\d{3,5})(?:\.|$)", tag)
+                width = _positive_int(match.group(1)) if match else None
+            except (ValueError, TypeError, UnicodeError, json.JSONDecodeError):
+                pass
+        if width and not height and aspect_width and aspect_height:
+            height = round(width * aspect_height / aspect_width)
+        return width, height
+
     @classmethod
     def _media_from_dom(cls, page: Page, post_url: str) -> tuple[list[InstagramMedia], tuple[int, int]]:
         try:
@@ -1105,7 +1171,7 @@ class InstagramCollector(BrowserSession):
             if (media.media_type, media.media_url) not in seen:
                 seen.add((media.media_type, media.media_url))
                 result.append(media)
-        return [InstagramMedia(**{**asdict(item), "media_index": index}) for index, item in enumerate(result)], (
+        return [replace(item, media_index=index) for index, item in enumerate(result)], (
             sum(1 for item in items if str(item.get("tag")) == "img"),
             sum(1 for item in items if str(item.get("tag")) == "video"),
         )
@@ -1163,7 +1229,7 @@ class InstagramCollector(BrowserSession):
                 on_media(fresh)
             if stopped() or finish():
                 break
-        return [InstagramMedia(**{**asdict(item), "media_index": index}) for index, item in enumerate(result)], clicked
+        return [replace(item, media_index=index) for index, item in enumerate(result)], clicked
 
     @staticmethod
     def _merge_media(first: list[InstagramMedia], second: list[InstagramMedia]) -> list[InstagramMedia]:
@@ -1173,7 +1239,7 @@ class InstagramCollector(BrowserSession):
             if _media_dedupe_key(item) not in seen:
                 seen.add(_media_dedupe_key(item))
                 result.append(item)
-        return [InstagramMedia(**{**asdict(item), "media_index": index}) for index, item in enumerate(result)]
+        return [replace(item, media_index=index) for index, item in enumerate(result)]
 
     @staticmethod
     def _merge_diagnostics(target: InstagramScanDiagnostics, source: InstagramScanDiagnostics) -> None:
@@ -1212,6 +1278,7 @@ class InstagramCollector(BrowserSession):
                     thumbnail_url=item.thumbnail_url,
                     metadata_source=metadata.metadata_source,
                     source=InstagramCollector._source_type(item.source) or item.source,
+                    video_sources=item.video_sources,
                 )
             )
         return result

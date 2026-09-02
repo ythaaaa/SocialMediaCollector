@@ -66,6 +66,17 @@ def find_ffmpeg() -> str | None:
     return path
 
 
+def find_ffprobe() -> str | None:
+    override = os.environ.get("SOCIAL_MEDIA_COLLECTOR_FFPROBE_PATH")
+    if override and Path(override).is_file():
+        return override
+    for ffmpeg_path in _bundled_ffmpeg_candidates():
+        candidate = ffmpeg_path.with_name("ffprobe.exe")
+        if candidate.is_file():
+            return str(candidate)
+    return shutil.which("ffprobe")
+
+
 def ffmpeg_source() -> str | None:
     _path, source = resolve_ffmpeg()
     return source

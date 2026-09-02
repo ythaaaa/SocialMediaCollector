@@ -17,6 +17,7 @@ from PIL import Image, UnidentifiedImageError
 from src.browser import BrowserSessionManager, ImageCandidate, InstagramCollector, PinterestCollector, PinterestVideoSource, XCollector
 from src.models import DownloadRecord, TaskConfig, TaskStats
 from src.downloader.hls import HLSDownloadCancelled, HLSDownloadError, HLSDownloader
+from src.downloader.dash import DASHDownloadCancelled, DASHDownloadError, DASHDownloader
 from src.storage import CollectorDatabase, TaskStore
 from src.utils.paths import create_task_directory
 
@@ -326,7 +327,7 @@ class DownloadEngine:
             self.on_log(f"已保存 {filename}（{width}×{height}）")
         except HLSDownloadCancelled:
             return
-        except (httpx.HTTPError, HLSDownloadError, UnidentifiedImageError, OSError, ValueError) as exc:
+        except (httpx.HTTPError, HLSDownloadError, DASHDownloadError, UnidentifiedImageError, OSError, ValueError) as exc:
             self.stats.failed += 1; record.status, record.reason = "failed", str(exc); store.append(record)
             suffix = "；当前视频已跳过，将继续处理后续候选。" if candidate.media_type == "video" else ""
             self.on_log(f"下载失败：{media_url} - {exc}{suffix}")
@@ -373,13 +374,30 @@ class DownloadEngine:
                             self.stop_event.is_set,
                             self._wait_if_paused,
                         ).download(source.url, part_path)
+                    elif source.kind == "dash":
+                        result = DASHDownloader(
+                            client,
+                            {"Referer": referer, "User-Agent": "Mozilla/5.0"},
+                            self.config.retry_count,
+                            self.stop_event.is_set,
+                            self._wait_if_paused,
+                        ).download(
+                            source.url,
+                            part_path,
+                            audio_url=source.audio_url,
+                            width=source.width,
+                            height=source.height,
+                            bitrate=source.bitrate,
+                            codec=source.codec,
+                            duration=source.duration,
+                        )
                     else:
                         result = self._download_direct_video(client, source.url, part_path, source, referer)
                     selected_source = source
                     break
-                except HLSDownloadCancelled:
+                except (HLSDownloadCancelled, DASHDownloadCancelled):
                     raise
-                except (HLSDownloadError, httpx.HTTPError, OSError) as exc:
+                except (HLSDownloadError, DASHDownloadError, httpx.HTTPError, OSError) as exc:
                     last_error = exc
                     if part_path.exists():
                         part_path.unlink()
@@ -419,11 +437,11 @@ class DownloadEngine:
             self.database.register_media(candidate, self.config.canonical_source_value, digest, final_path, self.config.task_id)
             self.on_log(f"已保存 {record.filename}（视频）")
             self.on_log("Pinterest视频阶段=mp4_saved")
-        except HLSDownloadCancelled:
+        except (HLSDownloadCancelled, DASHDownloadCancelled):
             self.on_log(f"{stage_label}=failed_stage=stopped")
             raise
-        except HLSDownloadError as exc:
-            self.on_log(f"{stage_label}=failed_stage=hls_download_or_ffmpeg，{exc}")
+        except (HLSDownloadError, DASHDownloadError) as exc:
+            self.on_log(f"{stage_label}=failed_stage=video_download_or_ffmpeg，{exc}")
             raise
         finally:
             if part_path.exists():
