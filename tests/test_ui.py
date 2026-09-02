@@ -8,7 +8,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import pytest
 from PIL import Image
-from PySide6.QtCore import QItemSelectionModel
+from PySide6.QtCore import QItemSelectionModel, Qt
 from PySide6.QtWidgets import QApplication, QFrame, QLabel
 
 from src.models import TaskConfig, TaskStats
@@ -79,6 +79,73 @@ def test_x_search_scope_still_writes_task_config(window: MainWindow) -> None:
 
     assert config.search_scope == "top"
     assert config.canonical_search_scope() == "top"
+
+
+def test_platform_combo_uses_registry_icons_and_disables_reserved_platforms(window: MainWindow) -> None:
+    assert window.platform.count() == 4
+    assert [window.platform.itemData(i) for i in range(window.platform.count())] == [
+        "pinterest", "x", "instagram", "youtube",
+    ]
+    assert all(not window.platform.itemIcon(i).isNull() for i in range(window.platform.count()))
+
+    for index in (2, 3):
+        item = window.platform.model().item(index)
+        assert item is not None
+        assert not (item.flags() & Qt.ItemFlag.ItemIsEnabled)
+
+    window.platform.setCurrentIndex(2)
+    assert window.platform.currentData() == "instagram"
+    assert [window.mode.itemData(i) for i in range(window.mode.count())] == ["author", "single_post"]
+    assert [window.media_type.itemData(i) for i in range(window.media_type.count())] == ["image", "video", "mixed"]
+    assert not window.start.isEnabled()
+    assert "开发中" in window.mode_hint.text()
+
+
+def test_reserved_platform_cannot_start_task(window: MainWindow, monkeypatch: pytest.MonkeyPatch) -> None:
+    messages: list[str] = []
+    monkeypatch.setattr(
+        main_window_module.QMessageBox,
+        "warning",
+        staticmethod(lambda _parent, _title, message: messages.append(message)),
+    )
+
+    config = TaskConfig(
+        "",
+        1,
+        Path(window.database.path).parent,
+        platform="instagram",
+        collection_mode="author",
+        source_identifier="future-account",
+    )
+    window._start_config(config)
+
+    assert messages == ["该平台正在开发中，当前版本暂不支持实际采集。"]
+    assert window.worker is None
+
+
+def test_reserved_platform_cannot_start_queue(window: MainWindow, monkeypatch: pytest.MonkeyPatch) -> None:
+    messages: list[str] = []
+    monkeypatch.setattr(
+        main_window_module.QMessageBox,
+        "warning",
+        staticmethod(lambda _parent, _title, message: messages.append(message)),
+    )
+    task = QueueTask(
+        TaskConfig(
+            "",
+            1,
+            Path(window.database.path).parent,
+            platform="youtube",
+            collection_mode="search",
+            source_identifier="future videos",
+        )
+    )
+    window.queue_tasks[:] = [task]
+
+    window.start_queue_tasks()
+
+    assert messages == ["该平台正在开发中，当前版本暂不支持实际采集。"]
+    assert window.queue_runner is None
 
 
 def test_control_handlers_call_engine_and_follow_confirmed_states(window: MainWindow) -> None:

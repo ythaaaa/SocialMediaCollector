@@ -3,6 +3,7 @@ from pathlib import Path
 import pytest
 
 from src.models import TaskConfig
+from src.platforms import PLATFORM_REGISTRY, get_platform_spec
 from src.ui.input_state import ModeInputState
 from src.version import APP_VERSION
 
@@ -64,4 +65,39 @@ def test_task_config_exposes_v2_queue_fields_and_reads_legacy_data() -> None:
 
 
 def test_v2_release_candidate_version() -> None:
-    assert APP_VERSION == "2.0.0"
+    assert APP_VERSION == "2.1.0-dev"
+
+
+def test_platform_registry_declares_current_and_reserved_capabilities() -> None:
+    assert set(PLATFORM_REGISTRY) == {"pinterest", "x", "instagram", "youtube"}
+
+    pinterest = get_platform_spec("pinterest")
+    assert pinterest is not None
+    assert pinterest.enabled is True
+    assert pinterest.collection_modes == ("search", "home", "current_page")
+    assert pinterest.media_types == ("image", "video", "mixed")
+
+    x = get_platform_spec("x")
+    assert x is not None
+    assert x.enabled is True
+    assert x.collection_modes == ("author", "search", "home")
+    assert x.media_types == ("image", "video", "mixed")
+
+    instagram = get_platform_spec("instagram")
+    assert instagram is not None
+    assert instagram.enabled is False
+    assert instagram.collection_modes == ("author", "single_post")
+
+    youtube = get_platform_spec("youtube")
+    assert youtube is not None
+    assert youtube.enabled is False
+    assert youtube.collection_modes == ("search", "channel", "single_video")
+    assert youtube.media_types == ("video", "thumbnail", "video_thumbnail")
+
+
+def test_platform_resources_are_source_and_pyinstaller_inputs() -> None:
+    for spec in PLATFORM_REGISTRY.values():
+        assert Path("src/ui/resources", spec.icon).is_file()
+
+    build_script = Path("scripts/build_exe.ps1").read_text(encoding="utf-8")
+    assert "'--add-data', \"$uiResources;src\\ui\\resources\"" in build_script

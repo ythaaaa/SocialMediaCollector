@@ -9,7 +9,7 @@ from dataclasses import replace
 from pathlib import Path
 from uuid import uuid4
 
-from PySide6.QtCore import QSettings, Qt, QThread, Signal, QTimer
+from PySide6.QtCore import QSettings, QSize, Qt, QThread, Signal, QTimer
 from PySide6.QtGui import QCloseEvent, QIcon, QTextCursor
 from PySide6.QtWidgets import (
     QApplication, QCheckBox, QComboBox, QDoubleSpinBox, QFileDialog, QFormLayout, QFrame, QGridLayout,
@@ -22,6 +22,7 @@ from src.downloader import DownloadEngine
 from src.downloader.queue_runner import QueueRunner
 from src.browser.session import BrowserSession, BrowserSessionManager, find_chrome_path, regular_chrome_login_command
 from src.models import TaskConfig, TaskStats
+from src.platforms import get_platform_spec, media_type_label, mode_label, platform_specs
 from src.storage import CollectorDatabase, QueueStore
 from src.tasks import BatchInputError, QueueTask, build_batch_configs, remove_queue_tasks
 from src.ui.input_state import ModeInputState
@@ -145,8 +146,8 @@ class MainWindow(QMainWindow):
 
     def _create_controls(self) -> None:
         self.platform = QComboBox()
-        self.platform.addItem("Pinterest", "pinterest")
-        self.platform.addItem("X（Twitter）", "x")
+        self.platform.setIconSize(QSize(18, 18))
+        self._populate_platforms()
         self.platform.setMinimumHeight(36)
         self.mode = QComboBox()
         self.mode.setMinimumHeight(36)
@@ -602,34 +603,88 @@ class MainWindow(QMainWindow):
         if self.platform.currentData() == "x" and self.mode.currentData() == "search":
             self._search_scope_state = str(self.search_scope.currentData() or "media")
 
+    def _populate_platforms(self) -> None:
+        self.platform.clear()
+        for index, spec in enumerate(platform_specs()):
+            self.platform.addItem(QIcon(resource_path(spec.icon)), spec.label, spec.key)
+            if not spec.enabled:
+                item = self.platform.model().item(index)
+                if item is not None:
+                    item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsEnabled)
+
+    def _populate_platform_options(self, spec) -> None:
+        self.mode.blockSignals(True)
+        self.mode.clear()
+        for collection_mode in spec.collection_modes:
+            self.mode.addItem(mode_label(collection_mode), collection_mode)
+        default_mode = self.mode.findData(spec.default_mode)
+        self.mode.setCurrentIndex(default_mode if default_mode >= 0 else 0)
+        self.mode.blockSignals(False)
+
+        previous_media_type = self.media_type.currentData()
+        self.media_type.blockSignals(True)
+        self.media_type.clear()
+        for media_type in spec.media_types:
+            self.media_type.addItem(media_type_label(media_type), media_type)
+        restored_media_type = self.media_type.findData(previous_media_type)
+        if restored_media_type < 0:
+            restored_media_type = self.media_type.findData(spec.default_media_type)
+        self.media_type.setCurrentIndex(restored_media_type if restored_media_type >= 0 else 0)
+        self.media_type.blockSignals(False)
+
+    def _show_development_platform(self, spec) -> None:
+        self.source_label.setVisible(False)
+        self.keyword.setVisible(False)
+        self.current_page_info.setVisible(False)
+        self.search_scope_label.setVisible(False)
+        self.search_scope.setVisible(False)
+        self.search_scope_field.setVisible(False)
+        self.only_author.setVisible(False)
+        self.only_prompt.setVisible(False)
+        self.batch_mode.setVisible(False)
+        self.batch_input.setVisible(False)
+        self.add_queue.setVisible(False)
+        self.mode_hint.setText(f"{spec.label.split(' ·', 1)[0]} 正在开发中，当前版本暂不支持实际采集。")
+        self.mode_hint.setVisible(True)
+        self.mode.setEnabled(False)
+        self.media_type.setEnabled(False)
+        self._update_batch_controls()
+
+    def _set_platform_controls_enabled(self, enabled: bool) -> None:
+        editable = enabled and not self._task_active
+        self.mode.setEnabled(editable)
+        self.media_type.setEnabled(editable)
+        self.start_queue.setEnabled(editable)
+        self.login_browser.setEnabled(editable and not (self.login_worker and self.login_worker.isRunning()))
+
     def _toggle_advanced(self, expanded: bool) -> None:
         self.advanced_panel.setVisible(expanded)
         self.advanced_toggle.setText("高级筛选  ‹" if expanded else "高级筛选  ›")
 
     def _platform_changed(self, _index: int) -> None:
         self._input_state.remember(self.keyword.text())
-        platform = self.platform.currentData()
-        self.mode.blockSignals(True)
-        self.mode.clear()
-        if platform == "x":
-            self.mode.addItem("作者主页", "author")
-            self.mode.addItem("关键词搜索", "search")
-            self.mode.addItem("首页推荐", "home")
-        else:
-            self.mode.addItem("关键词搜索", "search")
-            self.mode.addItem("首页推荐", "home")
-            self.mode.addItem("当前页面", "current_page")
-        self.mode.blockSignals(False)
+        spec = get_platform_spec(str(self.platform.currentData() or ""))
+        if spec is None:
+            return
+        self._populate_platform_options(spec)
+        self._set_platform_controls_enabled(spec.enabled)
         self._mode_changed(self.mode.currentIndex())
 
     def _mode_changed(self, _index: int) -> None:
         platform = self.platform.currentData()
         mode = self.mode.currentData()
+        spec = get_platform_spec(str(platform or ""))
+        if spec is None:
+            return
         restored_value = self._input_state.switch((platform, mode), self.keyword.text())
         self.keyword.blockSignals(True)
         self.keyword.setText(restored_value)
         self.keyword.blockSignals(False)
         self.current_page_info.setVisible(False)
+        if not spec.enabled:
+            self._show_development_platform(spec)
+            return
+        self._set_platform_controls_enabled(True)
         if platform == "x":
             author_mode = mode == "author"
             search_mode = mode == "search"
@@ -703,11 +758,21 @@ class MainWindow(QMainWindow):
             self.keyword.setVisible(False)
 
     def _batch_supported(self) -> bool:
-        return (self.platform.currentData(), self.mode.currentData()) in {
+        spec = get_platform_spec(str(self.platform.currentData() or ""))
+        return bool(spec and spec.enabled and (self.platform.currentData(), self.mode.currentData()) in {
             ("pinterest", "search"),
             ("x", "author"),
             ("x", "search"),
-        }
+        })
+
+    def _has_disabled_pending_platform(self) -> bool:
+        for task in self.queue_tasks:
+            if task.status != "pending":
+                continue
+            spec = get_platform_spec(task.config.canonical_platform())
+            if spec is None or not spec.enabled:
+                return True
+        return False
 
     def _update_batch_controls(self, running: bool = False) -> None:
         supported = self._batch_supported()
@@ -720,7 +785,8 @@ class MainWindow(QMainWindow):
         self.keyword.setVisible(not batch_enabled)
         self.batch_input.setVisible(batch_enabled)
         self.add_queue.setVisible(batch_enabled)
-        self.start.setEnabled(not running and not batch_enabled)
+        platform = get_platform_spec(str(self.platform.currentData() or ""))
+        self.start.setEnabled(bool(platform and platform.enabled) and not running and not batch_enabled)
         self.batch_input.setEnabled(batch_enabled and not running)
         self.add_queue.setEnabled(batch_enabled and not running)
 
@@ -855,6 +921,9 @@ class MainWindow(QMainWindow):
             return
         if not any(task.status == "pending" for task in self.queue_tasks):
             QMessageBox.information(self, "任务队列", "队列中没有等待执行的任务。")
+            return
+        if self._has_disabled_pending_platform():
+            QMessageBox.warning(self, "无法开始队列", "该平台正在开发中，当前版本暂不支持实际采集。")
             return
         profile = browser_profile_directory()
         if not self.browser_manager.is_running() and BrowserSession.profile_is_locked(profile):
@@ -1045,6 +1114,10 @@ class MainWindow(QMainWindow):
             if self.queue_runner and self.queue_runner.isRunning():
                 QMessageBox.warning(self, "无法开始", "任务队列正在运行，请先停止队列。")
                 return
+            spec = get_platform_spec(config.canonical_platform())
+            if spec is None or not spec.enabled:
+                QMessageBox.warning(self, "无法开始", "该平台正在开发中，当前版本暂不支持实际采集。")
+                return
             config.validate()
             profile = browser_profile_directory()
             if config.canonical_collection_mode() == "current_page" and not self.browser_manager.is_running():
@@ -1200,7 +1273,11 @@ class MainWindow(QMainWindow):
         self._update_batch_controls(running)
         self._refresh_control_buttons()
         self._history_selection_changed()
-        self.login_browser.setEnabled(not running and not (self.login_worker and self.login_worker.isRunning()))
+        spec = get_platform_spec(str(self.platform.currentData() or ""))
+        self.login_browser.setEnabled(
+            not running and bool(spec and spec.enabled)
+            and not (self.login_worker and self.login_worker.isRunning())
+        )
         if running:
             self.open_dir.setProperty("attention", False)
             self._refresh_style(self.open_dir)
