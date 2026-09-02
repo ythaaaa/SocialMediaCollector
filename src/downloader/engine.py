@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import hashlib
 import io
+import inspect
 import time
+from dataclasses import replace
 from datetime import datetime
 from pathlib import Path
 from threading import Event
@@ -11,10 +13,10 @@ from typing import Callable
 import httpx
 from PIL import Image, UnidentifiedImageError
 
-from src.browser import ImageCandidate, PinterestCollector, XCollector
+from src.browser import BrowserSessionManager, ImageCandidate, PinterestCollector, PinterestVideoSource, XCollector
 from src.models import DownloadRecord, TaskConfig, TaskStats
 from src.downloader.hls import HLSDownloadCancelled, HLSDownloadError, HLSDownloader
-from src.storage import TaskStore
+from src.storage import CollectorDatabase, TaskStore
 from src.utils.paths import create_task_directory
 
 
@@ -26,19 +28,35 @@ class DownloadEngine:
         on_log: Callable[[str], None] = print,
         on_stats: Callable[[TaskStats], None] = lambda _: None,
         on_task_dir: Callable[[Path], None] | None = None,
+        database: CollectorDatabase | None = None,
+        browser_manager: BrowserSessionManager | None = None,
     ) -> None:
         config.validate()
         self.config, self.profile_dir, self.on_log, self.on_stats = config, profile_dir, on_log, on_stats
         self.on_task_dir = on_task_dir
+        self.database = database or CollectorDatabase(on_warning=on_log)
+        self.browser_manager = browser_manager
+        self.on_control_status: Callable[[str], None] = lambda _status: None
         self.pause_event, self.stop_event = Event(), Event()
         self.pause_event.set()
         self.stats = TaskStats()
         self.task_dir: Path | None = None
         self.task_output_dir: Path | None = None
 
-    def pause(self) -> None: self.pause_event.clear()
-    def resume(self) -> None: self.pause_event.set()
-    def stop(self) -> None: self.stop_event.set(); self.pause_event.set()
+    def pause(self) -> None:
+        self.pause_event.clear()
+        self.database.update_task(self.config.task_id, status="paused")
+        self.on_control_status("paused")
+
+    def resume(self) -> None:
+        self.pause_event.set()
+        self.database.update_task(self.config.task_id, status="running")
+        self.on_control_status("running")
+
+    def stop(self) -> None:
+        self.stop_event.set()
+        self.pause_event.set()
+        self.database.update_task(self.config.task_id, status="stopped")
     def _wait_if_paused(self) -> None:
         while not self.pause_event.wait(timeout=0.2):
             if self.stop_event.is_set(): return
@@ -49,9 +67,13 @@ class DownloadEngine:
     def run(self) -> Path:
         platform = self.config.canonical_platform()
         mode = self.config.canonical_collection_mode()
+        if mode == "current_page" and not (self.browser_manager and self.browser_manager.is_running()):
+            raise RuntimeError("请先点击『打开浏览器 / 登录』，在 Pinterest 中打开需要采集的页面，然后开始下载。")
         if platform == "x" and mode == "author":
             username, _ = self.config.canonical_author()
             task_name = f"x_{username}"
+        elif platform == "x" and mode == "search":
+            task_name = f"x_{self.config.canonical_source_value}"
         elif platform == "x":
             task_name = "x_首页推荐流"
         else:
@@ -66,33 +88,79 @@ class DownloadEngine:
         self.task_dir = self.task_output_dir
         if self.on_task_dir:
             self.on_task_dir(self.task_output_dir)
-        store = TaskStore(self.task_output_dir, self.config)
         collector = XCollector(self.profile_dir, self.on_log, self.task_output_dir) if platform == "x" else PinterestCollector(self.profile_dir, self.on_log)
+        store: TaskStore | None = None
         try:
             self._emit("正在打开浏览器并收集图片")
-            collector.open()
+            if self.browser_manager and self.browser_manager.is_running() and self.browser_manager.endpoint:
+                collector.connect_over_cdp(self.browser_manager.endpoint)
+            else:
+                collector.open()
+            page = collector.prepare_current_page() if mode == "current_page" and hasattr(collector, "prepare_current_page") else getattr(collector, "page", None)
+            if mode == "current_page" and page:
+                self.config = replace(self.config, source_page_url=page.url)
+            self.database.start_task(self.config, self.task_output_dir)
+            store = TaskStore(self.task_output_dir, self.config)
             known = store.known_hashes()
             with httpx.Client(headers={"User-Agent": "Mozilla/5.0"}, follow_redirects=True, timeout=30) as client:
                 on_candidate = lambda candidate: self._process_candidate(client, candidate, store, known)
                 should_finish = lambda: self.stats.downloaded >= self.config.target_count
                 if platform == "x" and mode == "author":
                     candidates = collector.collect_author(self.config.canonical_source_value, self.config.target_count, self.config.max_scrolls, self.config.only_author_content, self.stop_event.is_set, self._wait_if_paused, self._on_found, on_candidate, should_finish, self.config.canonical_media_type(), self.config.only_prompt_posts)
+                elif platform == "x" and mode == "search":
+                    candidates = collector.collect_search(
+                        self.config.canonical_source_value,
+                        self.config.target_count,
+                        self.config.max_scrolls,
+                        self.stop_event.is_set,
+                        self._wait_if_paused,
+                        self._on_found,
+                        on_candidate,
+                        should_finish,
+                        self.config.canonical_media_type(),
+                        self.config.only_prompt_posts,
+                        self.config.canonical_search_scope(),
+                        self._should_skip_discovered_candidate,
+                    )
                 elif platform == "x":
                     candidates = collector.collect_home(self.config.target_count, self.config.max_scrolls, self.stop_event.is_set, self._wait_if_paused, self._on_found, on_candidate, should_finish, self.config.canonical_media_type(), self.config.only_prompt_posts)
                 elif mode == "search":
-                    candidates = collector.collect(self.config.keyword, self.config.target_count, self.config.max_scrolls, self.stop_event.is_set, self._wait_if_paused, self._on_found, on_candidate, should_finish)
+                    collect_args = (self.config.keyword, self.config.target_count, self.config.max_scrolls, self.stop_event.is_set, self._wait_if_paused, self._on_found, on_candidate, should_finish)
+                    if "media_type" in inspect.signature(collector.collect).parameters:
+                        collect_args += (self.config.canonical_media_type(),)
+                    candidates = collector.collect(*collect_args)
                 elif mode == "home":
-                    candidates = collector.collect_home(self.config.target_count, self.config.max_scrolls, self.stop_event.is_set, self._wait_if_paused, self._on_found, on_candidate, should_finish)
+                    collect_args = (self.config.target_count, self.config.max_scrolls, self.stop_event.is_set, self._wait_if_paused, self._on_found, on_candidate, should_finish)
+                    if "media_type" in inspect.signature(collector.collect_home).parameters:
+                        collect_args += (self.config.canonical_media_type(),)
+                    candidates = collector.collect_home(*collect_args)
                 else:
-                    candidates = collector.collect_current_page(self.config.target_count, self.config.max_scrolls, self.stop_event.is_set, self._wait_if_paused, self._on_found, on_candidate, should_finish)
+                    collect_args = (self.config.target_count, self.config.max_scrolls, self.stop_event.is_set, self._wait_if_paused, self._on_found, on_candidate, should_finish)
+                    if "media_type" in inspect.signature(collector.collect_current_page).parameters:
+                        collect_args += (self.config.canonical_media_type(),)
+                    candidates = collector.collect_current_page(*collect_args)
             self.on_log(f"收集完成，发现 {len(candidates)} 个候选资源。")
+            self.on_log(
+                f"下载统计：成功保存 {self.stats.downloaded}/{self.config.target_count}，"
+                f"历史重复 {self.stats.duplicate_count}，下载失败 {self.stats.failed}，"
+                f"已跳过 {self.stats.skipped}。"
+            )
             if not self.stop_event.is_set() and self.stats.downloaded < self.config.target_count:
                 self.on_log(f"目标 {self.config.target_count} 张，实际成功 {self.stats.downloaded} 张；页面暂无更多可采集内容。")
-            store.complete(self.stats, self.stop_event.is_set())
             status = "已停止" if self.stop_event.is_set() else ("任务完成" if self.stats.downloaded >= self.config.target_count else "采集结束（页面暂无更多内容）")
+            assert store is not None
+            store.complete(self.stats, self.stop_event.is_set())
+            self.database.finish_task(
+                self.config,
+                self.stats,
+                "stopped" if self.stop_event.is_set() else "completed",
+                task_output_dir=self.task_output_dir,
+            )
             self._emit(status)
         except Exception as exc:
-            store.complete(self.stats, self.stop_event.is_set(), str(exc))
+            if store is not None:
+                store.complete(self.stats, self.stop_event.is_set(), str(exc))
+            self.database.finish_task(self.config, self.stats, "failed", str(exc), self.task_output_dir)
             raise
         finally:
             collector.close()
@@ -107,10 +175,28 @@ class DownloadEngine:
         self._wait_if_paused()
         if self.stop_event.is_set():
             return
+        duplicate = self.database.find_duplicate(candidate, self.config.canonical_source_value)
+        if duplicate:
+            self.stats.duplicate_count += 1
+            if self.stats.duplicate_count == 1 or self.stats.duplicate_count % 10 == 0:
+                self.on_log(f"已跳过历史重复素材：{self.stats.duplicate_count} 个")
+            self._emit()
+            return
         self._emit("正在下载视频" if candidate.media_type == "video" else "正在下载图片")
         self._download_one(client, candidate, store, known)
         self._emit()
         self._sleep_interval()
+
+    def _should_skip_discovered_candidate(self, candidate: ImageCandidate) -> bool:
+        """Apply the existing Phase 4 identity check before Media detail-page work."""
+        duplicate = self.database.find_duplicate(candidate, self.config.canonical_source_value)
+        if not duplicate:
+            return False
+        self.stats.duplicate_count += 1
+        if self.stats.duplicate_count == 1 or self.stats.duplicate_count % 10 == 0:
+            self.on_log(f"已跳过历史重复素材：{self.stats.duplicate_count} 个")
+        self._emit()
+        return True
 
     def _sleep_interval(self) -> None:
         self._sleep_controlled(self.config.interval_seconds)
@@ -156,18 +242,36 @@ class DownloadEngine:
             if candidate.media_type == "video":
                 self._download_video(client, candidate, record, store, known)
                 return
-            content = b""
-            for attempt in range(self.config.retry_count):
-                try:
-                    referer = "https://x.com/" if platform == "x" else "https://www.pinterest.com/"
-                    response = client.get(media_url, headers={"Referer": referer})
-                    response.raise_for_status(); content = response.content; break
-                except httpx.HTTPError:
-                    if attempt == self.config.retry_count - 1: raise
-                    self._sleep_controlled(1 + attempt)
+            content: bytes | None = None
+            last_error: httpx.HTTPError | None = None
+            download_urls = list(dict.fromkeys(url for url in (media_url, *candidate.fallback_urls) if url))
+            for download_url in download_urls:
+                for attempt in range(self.config.retry_count):
+                    try:
+                        referer = "https://x.com/" if platform == "x" else "https://www.pinterest.com/"
+                        response = client.get(download_url, headers={"Referer": referer})
+                        response.raise_for_status()
+                        content = response.content
+                        media_url = download_url
+                        break
+                    except httpx.HTTPError as exc:
+                        last_error = exc
+                        if attempt < self.config.retry_count - 1:
+                            self._sleep_controlled(1 + attempt)
+                if content is not None:
+                    break
+            if content is None:
+                raise last_error or httpx.HTTPError("图片下载失败")
+            record.image_url = media_url
+            record.media_url = media_url
             digest = hashlib.sha256(content).hexdigest()
-            if digest in known:
-                self.stats.skipped += 1; record.status, record.reason, record.content_hash = "skipped", "内容重复", digest; store.append(record); return
+            if digest in known or self.database.find_hash_duplicate(digest):
+                self.stats.duplicate_count += 1
+                record.status, record.reason, record.content_hash = "skipped", "内容重复", digest
+                store.append(record)
+                if self.stats.duplicate_count == 1 or self.stats.duplicate_count % 10 == 0:
+                    self.on_log(f"已跳过历史重复素材：{self.stats.duplicate_count} 个")
+                return
             with Image.open(io.BytesIO(content)) as image:
                 image.verify()
             with Image.open(io.BytesIO(content)) as image:
@@ -181,11 +285,14 @@ class DownloadEngine:
             record.filename, record.width, record.height, record.file_size = filename, width, height, len(content)
             record.image_format, record.downloaded_at, record.content_hash, record.status = fmt, datetime.now().isoformat(timespec="seconds"), digest, "downloaded"
             store.append(record); known.add(digest); self.stats.downloaded += 1
+            self.database.register_media(candidate, self.config.canonical_source_value, digest, self.task_dir / "images" / filename, self.config.task_id)
             self.on_log(f"已保存 {filename}（{width}×{height}）")
         except HLSDownloadCancelled:
             return
         except (httpx.HTTPError, HLSDownloadError, UnidentifiedImageError, OSError, ValueError) as exc:
-            self.stats.failed += 1; record.status, record.reason = "failed", str(exc); store.append(record); self.on_log(f"下载失败：{media_url} - {exc}")
+            self.stats.failed += 1; record.status, record.reason = "failed", str(exc); store.append(record)
+            suffix = "；当前视频已跳过，将继续处理后续候选。" if candidate.media_type == "video" else ""
+            self.on_log(f"下载失败：{media_url} - {exc}{suffix}")
 
     def _download_video(self, client: httpx.Client, candidate: ImageCandidate, record: DownloadRecord, store: TaskStore, known: set[str]) -> None:
         assert self.task_dir
@@ -194,21 +301,65 @@ class DownloadEngine:
         basename = f"{self.stats.downloaded + 1:04d}.mp4"
         final_path = videos_dir / basename
         part_path = videos_dir / f".{basename}.part.mp4"
+        sources = list(candidate.video_sources)
+        if not sources:
+            media_url = candidate.media_url or candidate.image_url
+            sources = [PinterestVideoSource(media_url, candidate.video_width, candidate.video_height, candidate.duration, candidate.bitrate, "hls" if ".m3u8" in media_url.lower() else "mp4")]
+            sources.extend(
+                PinterestVideoSource(url, candidate.video_width, candidate.video_height, candidate.duration, candidate.bitrate, "hls" if ".m3u8" in url.lower() else "mp4")
+                for url in candidate.fallback_urls
+                if url != media_url
+            )
+        result = None
+        selected_source = None
+        last_error: Exception | None = None
         try:
-            result = HLSDownloader(
-                client,
-                {"Referer": "https://x.com/", "User-Agent": "Mozilla/5.0"},
-                self.config.retry_count,
-                self.stop_event.is_set,
-                self._wait_if_paused,
-            ).download(candidate.media_url or candidate.image_url, part_path)
+            is_x = self.config.canonical_platform() == "x"
+            stage_label = "Media视频阶段" if is_x else "Pinterest视频阶段"
+            referer = "https://x.com/" if is_x else "https://www.pinterest.com/"
+            for source in sources:
+                if self.stop_event.is_set():
+                    raise HLSDownloadCancelled()
+                try:
+                    self.on_log(f"{stage_label}=downloading_{source.kind}")
+                    if source.kind == "hls":
+                        result = HLSDownloader(
+                            client,
+                            {"Referer": referer, "User-Agent": "Mozilla/5.0"},
+                            self.config.retry_count,
+                            self.stop_event.is_set,
+                            self._wait_if_paused,
+                        ).download(source.url, part_path)
+                    else:
+                        result = self._download_direct_video(client, source.url, part_path, source, referer)
+                    selected_source = source
+                    break
+                except HLSDownloadCancelled:
+                    raise
+                except (HLSDownloadError, httpx.HTTPError, OSError) as exc:
+                    last_error = exc
+                    if part_path.exists():
+                        part_path.unlink()
+                    self.on_log(f"Pinterest视频候选失败，将继续后续来源：{source.url} - {exc}")
+            if result is None or selected_source is None:
+                raise last_error or HLSDownloadError("Pinterest 视频没有可用下载来源。")
+            if self.stop_event.is_set():
+                raise HLSDownloadCancelled()
             digest = self._file_hash(part_path)
-            if digest in known:
-                self.stats.skipped += 1
+            if digest in known or self.database.find_hash_duplicate(digest, part_path):
+                self.stats.duplicate_count += 1
                 record.status, record.reason, record.content_hash = "skipped", "内容重复", digest
                 store.append(record)
+                if self.stats.duplicate_count == 1 or self.stats.duplicate_count % 10 == 0:
+                    self.on_log(f"已跳过历史重复素材：{self.stats.duplicate_count} 个")
                 return
+            if self.stop_event.is_set():
+                raise HLSDownloadCancelled()
             part_path.replace(final_path)
+            if self.stop_event.is_set():
+                if final_path.exists():
+                    final_path.unlink()
+                raise HLSDownloadCancelled()
             record.filename = f"videos/{basename}"
             record.file_size = final_path.stat().st_size
             record.image_format = "MP4"
@@ -218,14 +369,38 @@ class DownloadEngine:
             record.duration = result.duration or record.duration
             record.video_width = result.width or record.video_width
             record.video_height = result.height or record.video_height
-            record.bitrate = result.bitrate
+            record.bitrate = result.bitrate or selected_source.bitrate
             store.append(record)
             known.add(digest)
             self.stats.downloaded += 1
+            self.database.register_media(candidate, self.config.canonical_source_value, digest, final_path, self.config.task_id)
             self.on_log(f"已保存 {record.filename}（视频）")
+            self.on_log("Pinterest视频阶段=mp4_saved")
+        except HLSDownloadCancelled:
+            self.on_log(f"{stage_label}=failed_stage=stopped")
+            raise
+        except HLSDownloadError as exc:
+            self.on_log(f"{stage_label}=failed_stage=hls_download_or_ffmpeg，{exc}")
+            raise
         finally:
             if part_path.exists():
                 part_path.unlink()
+
+    def _download_direct_video(self, client: httpx.Client, url: str, output_path: Path, source: PinterestVideoSource, referer: str):
+        with client.stream("GET", url, headers={"Referer": referer, "User-Agent": "Mozilla/5.0"}) as response:
+            response.raise_for_status()
+            with output_path.open("wb") as handle:
+                for chunk in response.iter_bytes(1024 * 1024):
+                    if self.stop_event.is_set():
+                        raise HLSDownloadCancelled()
+                    self._wait_if_paused()
+                    if self.stop_event.is_set():
+                        raise HLSDownloadCancelled()
+                    handle.write(chunk)
+        if not output_path.exists() or output_path.stat().st_size < 1024:
+            raise HLSDownloadError("Pinterest MP4 文件为空或不完整。")
+        from src.downloader.hls import HLSResult
+        return HLSResult(source.duration, source.width, source.height, source.bitrate)
 
     @staticmethod
     def _file_hash(path: Path) -> str:

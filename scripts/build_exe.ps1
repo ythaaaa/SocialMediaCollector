@@ -15,7 +15,8 @@ $assets = Join-Path $projectRoot 'assets'
 $vendorRuntime = Join-Path $projectRoot 'vendor\ffmpeg'
 $ffmpeg = Join-Path $projectRoot 'vendor\ffmpeg\ffmpeg.exe'
 $license = Join-Path $projectRoot 'vendor\ffmpeg\LICENSE.txt'
-foreach ($required in @($python, $ffmpeg, $license)) {
+$systemIcu = Join-Path $env:SystemRoot 'System32\icuuc.dll'
+foreach ($required in @($python, $ffmpeg, $license, $systemIcu)) {
     if (-not (Test-Path -LiteralPath $required -PathType Leaf)) {
         throw "缺少发布资源：$required"
     }
@@ -39,6 +40,7 @@ $pyInstallerArgs = @(
     '--add-data', "$license;vendor\ffmpeg",
     '--add-binary', "$ffmpeg;vendor\ffmpeg",
     '--icon', (Join-Path $assets 'app_icon.ico'),
+    '--version-file', (Join-Path $projectRoot 'installer\version_info.txt'),
     'app.py'
 )
 foreach ($dll in $runtimeDlls) {
@@ -52,4 +54,7 @@ $exe = Join-Path $release 'SocialMediaCollector.exe'
 if (-not (Test-Path -LiteralPath $exe -PathType Leaf)) {
     throw "构建完成但未找到 EXE：$exe"
 }
+# Qt6Core needs the Windows ICU build with its unsuffixed exports. PyInstaller
+# can otherwise pick an incompatible ICU from another runtime on PATH.
+Copy-Item -LiteralPath $systemIcu -Destination (Join-Path $release '_internal\icuuc.dll') -Force
 Write-Host "完成：$exe"

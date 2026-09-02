@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import shutil
+import subprocess
 import sys
 from pathlib import Path
 
@@ -68,3 +69,8 @@ def find_ffmpeg() -> str | None:
 def ffmpeg_source() -> str | None:
     _path, source = resolve_ffmpeg()
     return source
+
+
+def subprocess_creation_flags() -> int:
+    """Hide console windows for child processes on Windows."""
+    return subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0

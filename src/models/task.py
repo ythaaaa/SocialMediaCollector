@@ -8,7 +8,7 @@ from uuid import uuid4
 from src.utils.x import normalize_x_author
 
 
-TASK_STATUSES = frozenset({"pending", "running", "paused", "completed", "failed", "stopped"})
+TASK_STATUSES = frozenset({"pending", "running", "paused", "completed", "failed", "stopped", "interrupted"})
 
 
 def _looks_like_url(value: str) -> bool:
@@ -48,6 +48,7 @@ class TaskConfig:
     author_username: str = ""
     only_author_content: bool = True
     media_type: str = "image"
+    search_scope: str = "media"
     only_prompt_posts: bool = False
     # V2 queue fields. Legacy fields above remain the source of truth for V1.
     task_id: str = field(default_factory=lambda: uuid4().hex)
@@ -107,6 +108,10 @@ class TaskConfig:
         }
         return aliases.get(raw, raw)
 
+    def canonical_search_scope(self) -> str:
+        raw = (self.search_scope or "media").strip().lower()
+        return raw or "media"
+
     @classmethod
     def from_dict(cls, data: Mapping[str, Any]) -> "TaskConfig":
         """Load current and legacy task.json data without requiring new fields."""
@@ -130,6 +135,7 @@ class TaskConfig:
             author_username=str(data.get("author_username") or ""),
             only_author_content=bool(data.get("only_author_content", data.get("only_author_posts", True))),
             media_type=str(data.get("media_type") or "image"),
+            search_scope=str(data.get("search_scope") or "media"),
             only_prompt_posts=bool(data.get("only_prompt_posts", False)),
             task_id=str(data.get("task_id") or uuid4().hex),
             status=str(data.get("status") or "pending"),
@@ -138,7 +144,7 @@ class TaskConfig:
     def validate(self) -> None:
         platform = self.canonical_platform()
         collection_mode = self.canonical_collection_mode()
-        supported_modes = {"search", "home", "current_page"} if platform == "pinterest" else {"author", "home"} if platform == "x" else set()
+        supported_modes = {"search", "home", "current_page"} if platform == "pinterest" else {"author", "home", "search"} if platform == "x" else set()
         if not supported_modes or collection_mode not in supported_modes:
             raise ValueError("unsupported collection mode")
         if self.status not in TASK_STATUSES:
@@ -151,10 +157,14 @@ class TaskConfig:
         if platform == "x":
             if self.canonical_media_type() not in {"image", "video", "mixed"}:
                 raise ValueError("X 下载内容类型无效")
+            if collection_mode == "search" and self.canonical_search_scope() not in {"media", "top"}:
+                raise ValueError("X 搜索范围无效")
             if collection_mode == "author":
                 self.canonical_author()
-        elif self.canonical_media_type() != "image":
-            raise ValueError("Pinterest 仅支持图片")
+            elif collection_mode == "search" and not self.source_value.strip():
+                raise ValueError("X 搜索关键词不能为空")
+        elif self.canonical_media_type() not in {"image", "video", "mixed"}:
+            raise ValueError("Pinterest 下载内容类型无效")
         if self.target_count < 1:
             raise ValueError("下载数量必须大于 0")
         if self.min_width < 1 or self.min_height < 1:
@@ -206,5 +216,6 @@ class TaskStats:
     downloaded: int = 0
     skipped: int = 0
     failed: int = 0
+    duplicate_count: int = 0
     current_status: str = "等待开始"
     records: list[DownloadRecord] = field(default_factory=list)

@@ -63,5 +63,5 @@ def test_task_config_exposes_v2_queue_fields_and_reads_legacy_data() -> None:
     assert queued.only_author_posts is False
 
 
-def test_v2_development_version() -> None:
-    assert APP_VERSION == "2.0.0-dev"
+def test_v2_release_candidate_version() -> None:
+    assert APP_VERSION == "2.0.0"

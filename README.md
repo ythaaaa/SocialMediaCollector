@@ -4,7 +4,7 @@ Windows 本地社交媒体图片采集工具。它通过可见的 Pinterest / X 
 
 当前发布版本：`Social Media Collector v1.0.0`
 
-当前内部开发版本：`2.0.0-dev`（V2 Phase 1，尚未创建新的正式发布版本）
+当前内部开发版本：`2.0.0-dev`（V2 当前开发阶段，尚未创建新的正式发布版本）
 
 平台由 `platform` 字段区分：旧任务缺少该字段时默认按 `pinterest` 解释。
 
@@ -14,11 +14,11 @@ Pinterest 的 GUI 和 CLI 共用三种采集模式：
 
 * `search` / 关键词搜索：按关键词打开搜索结果，保持原有工作流。
 * `home` / 首页推荐：从 Pinterest 首页推荐 Feed 开始，不需要关键词。
-* `current_page` / 当前页面：使用 Playwright 当前 Pinterest tab，不自动跳转到搜索页；如果浏览器尚未启动，会打开 Pinterest 并提示用户导航到目标页面。
+* `current_page` / 当前页面：复用应用托管浏览器中当前获得焦点的 Pinterest tab，不自动跳转或改写当前 URL；浏览器未启动时会提示先打开“浏览器 / 登录”。
 
 三种模式共用「下载数量」，它表示最终成功保存的合格图片数量。尺寸不足、格式错误、下载失败和哈希重复不会占用目标数量；采集器会继续滚动，直到达到目标或触发最大滚动/连续无新增保护。
 
-X 支持 `collection_mode=author`（作者主页）和 `collection_mode=home`（首页“为你推荐”）。X 下载内容类型为 `image`、`video`、`mixed`，统一使用最终成功媒体数量作为目标；作者主页默认仍为仅图片。
+X 支持 `collection_mode=author`（作者主页）、`collection_mode=search`（关键词搜索）和 `collection_mode=home`（首页“为你推荐”）。X 下载内容类型为 `image`、`video`、`mixed`，统一使用最终成功媒体数量作为目标；作者主页默认仍为仅图片。
 
 仅图片会跳过视频、视频封面、纯文字、广告、头像、banner 和 UI 图片，并继续执行 Pillow 尺寸过滤、URL/hash 去重。仅视频和 mixed 会从页面网络响应捕获 HLS m3u8，下载视频/音频分片后使用本地 FFmpeg 封装为 MP4；缺少 FFmpeg 时只记录视频失败，不影响图片模式。
 
@@ -65,17 +65,17 @@ py -3.12 -m venv .venv
 .\.venv\Scripts\python.exe -m src.downloader.cli --platform x --mode home --media-type mixed --count 5 --output "D:\X混合素材"
 ```
 
-GUI 的“打开浏览器 / 登录”入口会直接启动本机普通 `chrome.exe`，只传递专用 `--user-data-dir` 和目标登录页面，不使用 Playwright、自动化参数、remote debugging、webdriver、headless 或 `--no-sandbox`。用户可在普通 Chrome 中人工登录 Pinterest / X，完成验证码和 2FA 后关闭浏览器；登录状态只保存在固定的采集器专用目录 `%LOCALAPPDATA%\\PinterestLocalDownloader\\browser-data`，不会收集账号密码。
+GUI 的“打开浏览器 / 登录”入口会直接启动本机普通 `chrome.exe`，使用固定的专用 `--user-data-dir`，并由应用维护仅监听本机的调试端点以便复用同一个浏览器会话；不使用 Playwright 控制登录流程、webdriver、headless 或 `--no-sandbox`。用户可在普通 Chrome 中人工登录 Pinterest / X，完成验证码和 2FA；登录状态只保存在固定的采集器专用目录 `%LOCALAPPDATA%\\PinterestLocalDownloader\\browser-data`，不会收集账号密码。
 
-正式采集仍使用 Playwright `launch_persistent_context` 复用同一个 Profile，采集开始前若普通 Chrome 仍占用 Profile，会提示“请先关闭登录浏览器，再开始采集。”采集任务结束会关闭 Playwright context，但专用 Profile 数据保留。
+正式采集优先通过 Playwright CDP 连接复用应用托管的普通 Chrome；没有托管浏览器时仍使用 Playwright `launch_persistent_context`。Pinterest `current_page` 直接使用当前 Pinterest tab，任务结束只断开采集连接，托管浏览器保持打开；专用 Profile 数据保留。
 
 采集器不会自动复制日常 Chrome Profile，也不会读取、上传或注入 Cookie。日常 Chrome 正在运行时不应复制其 Profile；Chrome Cookie 受 Windows/Chrome 加密和 Profile lock 保护。出现验证码、访问限制或 Google OAuth 的“不安全浏览器”提示时，请在普通 Chrome 中使用合法人工登录方式处理；软件不会绕过限制。
 
-若 Playwright Chromium 尚未安装但 Windows 已有 Chrome，正式采集会使用 Chrome 作为 Playwright 的 executable fallback；这与人工登录入口的普通 Chrome 进程是两个明确分开的生命周期。
+若 Playwright Chromium 尚未安装但 Windows 已有 Chrome，非托管采集会使用 Chrome 作为 Playwright 的 executable fallback。
 
 ## 输出
 
-每项任务建立独立目录：`关键词_时间/images/`、必要时的 `videos/`、`metadata.csv`、`failed.csv`、`task.json`。X 作者任务目录使用 `x_username_时间`，首页任务使用 `x_首页推荐流_时间`。mixed 模式以全局成功顺序编号，例如 `0001.jpg`、`videos/0002.mp4`。CSV 新增 `media_type`、`media_url`、`duration`、`video_width`、`video_height`、`bitrate` 等字段；旧 CSV 和旧 task.json 仍可读取。
+每项任务建立独立目录：`关键词_时间/images/`、必要时的 `videos/`、`metadata.csv`、`failed.csv`、`task.json`。X 作者任务目录使用 `x_username_时间`，X 搜索任务使用 `x_search_关键词_时间`，首页任务使用 `x_首页推荐流_时间`。mixed 模式以全局成功顺序编号，例如 `0001.jpg`、`videos/0002.mp4`。CSV 新增 `media_type`、`media_url`、`duration`、`video_width`、`video_height`、`bitrate` 等字段；旧 CSV 和旧 task.json 仍可读取。
 
 ## 测试
 
@@ -115,7 +115,8 @@ GUI 的“打开浏览器 / 登录”入口会直接启动本机普通 `chrome.e
 * 已知风险：X DOM/selector、动态 Feed、广告节点和 HLS 结构可能变化；平台可能出现登录、验证码和访问频率限制；HLS 加密播放列表暂不支持；视频停止通常在当前 FFmpeg 媒体完成后生效；Pinterest CDN 偶发 403；LGPL 选择不包含 GPL-only 的 libx264/libx265，未来若引入其他 FFmpeg 编码能力需重新审查许可证与运行时依赖
 * Git：Release 固化为本地 commit 和 annotated tag `v1.0.0`；不 push、不创建 GitHub Release；`.venv`、browser-data、Cookie、登录数据、测试媒体和临时 `.part` 不进入 Git
 * V2 Phase 1：内部开发版本 `2.0.0-dev`；GUI 按 `platform + collection_mode` 隔离并恢复输入状态；Pinterest 搜索 URL 输入会被拦截；X 作者输入在进入采集逻辑前统一为 username；现有 `TaskConfig` 扩展了 task_id、source_value、download_interval、save_dir、only_author_posts 和 status 兼容接口，为后续任务队列预留结构
-* V2 Phase 2（当前开发中，未提交）：支持 Pinterest 关键词和 X 作者多行批量添加；队列按顺序串行执行，支持等待/运行中/暂停/已完成/失败/已停止状态、失败后继续和 queue.json 持久化；不启用并发采集
+* V2 Phase 2（当前开发中，未提交）：支持 Pinterest 关键词、X 作者和 X 关键词多行批量添加；队列按顺序串行执行，支持等待/运行中/暂停/已完成/失败/已停止状态、失败后继续和 queue.json 持久化；不启用并发采集
+* V2 current_page / X search（当前开发中，未提交）：Pinterest 当前页面采集复用应用托管浏览器和当前 Pinterest tab，不要求先关闭浏览器；X 新增关键词搜索，支持图片、视频、mixed、Prompt 筛选、批量队列和既有去重/历史记录
 * 下一步：仅处理必要的发布维护、签名或远程发布策略；不新增采集功能、不迁移 Profile、不内置 FFmpeg 源码
 
 ## v1.0.0 发布内容

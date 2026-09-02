@@ -7,6 +7,7 @@ from src.utils.runtime import (
     ffmpeg_source,
     find_ffmpeg,
     resolve_ffmpeg,
+    subprocess_creation_flags,
 )
 
 
@@ -44,3 +45,7 @@ def test_bundled_ffmpeg_is_the_lgpl_shared_build() -> None:
     assert "--enable-gpl" not in version_info
     assert "--enable-nonfree" not in version_info
     assert "--enable-shared" in version_info
+
+
+def test_subprocess_creation_flags_hide_windows_console() -> None:
+    assert subprocess_creation_flags() == getattr(subprocess, "CREATE_NO_WINDOW", 0)

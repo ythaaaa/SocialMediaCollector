@@ -5,6 +5,7 @@ from threading import Event
 
 from PySide6.QtCore import QThread, Signal
 
+from src.browser import BrowserSessionManager
 from src.downloader.engine import DownloadEngine
 from src.storage import QueueStore
 from src.tasks import QueueTask
@@ -15,13 +16,15 @@ class QueueRunner(QThread):
     task_started = Signal(str)
     stats = Signal(object)
     log = Signal(str)
+    control_status = Signal(str)
     finished_queue = Signal()
 
-    def __init__(self, tasks: list[QueueTask], profile_dir: Path, store: QueueStore) -> None:
+    def __init__(self, tasks: list[QueueTask], profile_dir: Path, store: QueueStore, browser_manager: BrowserSessionManager | None = None) -> None:
         super().__init__()
         self.tasks = tasks
         self.profile_dir = profile_dir
         self.store = store
+        self.browser_manager = browser_manager
         self.current_engine: DownloadEngine | None = None
         self.current_task: QueueTask | None = None
         self._stop_requested = Event()
@@ -54,20 +57,30 @@ class QueueRunner(QThread):
         self.store.save(self.tasks)
         self.task_status.emit(task.task_id, status, error)
 
-    def _stop_pending(self, start_index: int) -> None:
-        for task in self.tasks[start_index:]:
+    def _stop_pending(self) -> None:
+        for task in list(self.tasks):
             if task.status == "pending":
                 self._set_status(task, "stopped")
 
     def run(self) -> None:
         try:
-            for index, task in enumerate(self.tasks):
-                if task.status != "pending":
-                    continue
+            while True:
+                # Re-scan the live list for every task. The GUI may remove
+                # pending items while the current task is running.
+                task = next(
+                    (candidate for candidate in list(self.tasks) if candidate.status == "pending"),
+                    None,
+                )
+                if task is None:
+                    break
                 self._continue_event.wait()
                 if self._stop_requested.is_set():
-                    self._stop_pending(index)
+                    self._stop_pending()
                     break
+                # The task may have been removed while the runner was
+                # paused/waiting. Never execute a task no longer in the queue.
+                if task not in self.tasks or task.status != "pending":
+                    continue
                 self._set_status(task, "running")
                 self.current_task = task
                 try:
@@ -76,16 +89,18 @@ class QueueRunner(QThread):
                     # fake engines used by tests and future integrations keep
                     # the original four-argument constructor contract.
                     self.current_engine.on_task_dir = lambda path: self.task_started.emit(str(path))
+                    self.current_engine.on_control_status = self.control_status.emit
+                    self.current_engine.browser_manager = self.browser_manager
                     self.current_engine.run()
                     if self._stop_requested.is_set():
                         self._set_status(task, "stopped")
-                        self._stop_pending(index + 1)
+                        self._stop_pending()
                         break
                     self._set_status(task, "completed")
                 except Exception as exc:
                     if self._stop_requested.is_set():
                         self._set_status(task, "stopped", str(exc))
-                        self._stop_pending(index + 1)
+                        self._stop_pending()
                         break
                     self._set_status(task, "failed", str(exc))
                     self.log.emit(f"队列任务失败，继续下一个任务：{exc}")

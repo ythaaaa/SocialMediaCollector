@@ -5,7 +5,9 @@ import os
 import subprocess
 import sys
 import time
+from dataclasses import replace
 from pathlib import Path
+from uuid import uuid4
 
 from PySide6.QtCore import QSettings, Qt, QThread, Signal, QTimer
 from PySide6.QtGui import QCloseEvent, QIcon, QTextCursor
@@ -13,30 +15,55 @@ from PySide6.QtWidgets import (
     QApplication, QCheckBox, QComboBox, QDoubleSpinBox, QFileDialog, QFormLayout, QFrame, QGridLayout,
     QHBoxLayout, QLabel, QLineEdit, QMainWindow, QMessageBox, QPushButton,
     QProgressBar, QScrollArea, QSpinBox, QTableWidget, QTableWidgetItem, QTextEdit, QToolButton, QVBoxLayout, QWidget,
+    QTabWidget,
 )
 
 from src.downloader import DownloadEngine
 from src.downloader.queue_runner import QueueRunner
-from src.browser.session import BrowserSession, find_chrome_path, regular_chrome_login_command
+from src.browser.session import BrowserSession, BrowserSessionManager, find_chrome_path, regular_chrome_login_command
 from src.models import TaskConfig, TaskStats
-from src.storage import QueueStore
-from src.tasks import BatchInputError, QueueTask, build_batch_configs
+from src.storage import CollectorDatabase, QueueStore
+from src.tasks import BatchInputError, QueueTask, build_batch_configs, remove_queue_tasks
 from src.ui.input_state import ModeInputState
-from src.ui.resources import app_icon_path, resource_path, stylesheet
+from src.ui.resources import app_icon_path, resource_path, set_windows_app_user_model_id, stylesheet
 from src.utils.paths import browser_profile_directory
 from src.version import APP_VERSION
+
+
+class NoWheelMixin:
+    """Keep page scrolling natural without changing a numeric field by accident."""
+
+    def wheelEvent(self, event) -> None:  # noqa: N802 - Qt event API
+        event.ignore()
+
+
+class NoWheelSpinBox(NoWheelMixin, QSpinBox):
+    pass
+
+
+class NoWheelDoubleSpinBox(NoWheelMixin, QDoubleSpinBox):
+    pass
 
 
 class Worker(QThread):
     log = Signal(str)
     stats = Signal(object)
     task_started = Signal(str)
+    control_status = Signal(str)
     done = Signal(str)
     failed = Signal(str)
 
-    def __init__(self, config: TaskConfig, profile_dir: Path) -> None:
+    def __init__(self, config: TaskConfig, profile_dir: Path, browser_manager: BrowserSessionManager | None = None) -> None:
         super().__init__()
-        self.engine = DownloadEngine(config, profile_dir, self.log.emit, self.stats.emit, lambda path: self.task_started.emit(str(path)))
+        self.engine = DownloadEngine(
+            config,
+            profile_dir,
+            self.log.emit,
+            self.stats.emit,
+            lambda path: self.task_started.emit(str(path)),
+            browser_manager=browser_manager,
+        )
+        self.engine.on_control_status = self.control_status.emit
 
     def run(self) -> None:
         try:
@@ -51,37 +78,21 @@ class ChromeLoginWorker(QThread):
     log = Signal(str)
     failed = Signal(str)
 
-    def __init__(self, profile_dir: Path, target_url: str) -> None:
+    def __init__(self, browser_manager: BrowserSessionManager, target_url: str) -> None:
         super().__init__()
-        self.profile_dir = profile_dir
+        self.browser_manager = browser_manager
         self.target_url = target_url
-        self.process: subprocess.Popen[bytes] | None = None
 
     def run(self) -> None:
         try:
-            chrome_path = find_chrome_path()
-            if not chrome_path:
-                raise RuntimeError("未找到本机 Google Chrome，无法打开普通登录浏览器。")
-            self.profile_dir.mkdir(parents=True, exist_ok=True)
-            if BrowserSession.profile_is_locked(self.profile_dir):
-                raise RuntimeError("请先关闭登录浏览器，再开始采集。")
-            command = regular_chrome_login_command(chrome_path, self.profile_dir, self.target_url)
-            self.process = subprocess.Popen(command, cwd=str(Path(chrome_path).parent))
-            self.log.emit(
-                f"普通 Chrome 已打开：{chrome_path}；专用 Profile：{self.profile_dir}；"
-                "请人工登录 Pinterest / X，完成后直接关闭浏览器窗口。"
-            )
-            started_at = time.monotonic()
+            self.browser_manager.open_browser(self.target_url)
+            self.log.emit("请在托管浏览器中人工登录 Pinterest / X，并导航到要采集的页面。")
             while not self.isInterruptionRequested():
-                process_exited = self.process.poll() is not None
-                profile_locked = BrowserSession.profile_is_locked(self.profile_dir)
-                if process_exited and not profile_locked and time.monotonic() - started_at > 2:
+                if not self.browser_manager.is_running():
                     break
                 time.sleep(0.5)
         except Exception as exc:
             self.failed.emit(str(exc))
-        finally:
-            self.process = None
 
 
 class StatBlock(QFrame):
@@ -116,14 +127,20 @@ class MainWindow(QMainWindow):
         self.last_task_dir: Path | None = None
         self.settings = QSettings("PinterestLocalDownloader", "SocialMediaCollector")
         self._input_state = ModeInputState()
+        self.browser_manager = BrowserSessionManager(browser_profile_directory(), lambda message: self.append_log(message))
         self.queue_store = QueueStore()
+        self.database = CollectorDatabase()
         self.queue_tasks: list[QueueTask] = []
         self.queue_runner: QueueRunner | None = None
+        self._control_state = "idle"
+        self._task_active = False
 
         self._create_controls()
         self._build_window()
         self._wire_actions()
         self._load_queue()
+        self.database.mark_running_interrupted()
+        self._refresh_history()
         self._set_running(False)
 
     def _create_controls(self) -> None:
@@ -133,6 +150,13 @@ class MainWindow(QMainWindow):
         self.platform.setMinimumHeight(36)
         self.mode = QComboBox()
         self.mode.setMinimumHeight(36)
+        self._search_scope_state = "media"
+        self.search_scope = QComboBox()
+        self.search_scope.addItem("媒体", "media")
+        self.search_scope.addItem("热门", "top")
+        self.search_scope.setMinimumHeight(36)
+        self.search_scope_label = self._field_label("搜索范围")
+        self.search_scope_field = self._parameter_field_with_label(self.search_scope_label, self.search_scope)
         self.media_type = QComboBox()
         self.media_type.addItem("仅图片", "image")
         self.media_type.addItem("仅视频", "video")
@@ -142,6 +166,10 @@ class MainWindow(QMainWindow):
         self.keyword = QLineEdit()
         self.keyword.setMinimumHeight(42)
         self.source_label = self._field_label("搜索关键词")
+        self.current_page_info = QLabel()
+        self.current_page_info.setObjectName("currentPageInfo")
+        self.current_page_info.setWordWrap(True)
+        self.current_page_info.setVisible(False)
         self.batch_mode = QCheckBox("批量任务")
         self.batch_input = QTextEdit()
         self.batch_input.setPlaceholderText("每行一个关键词或 X 作者，空行会忽略并自动去重")
@@ -149,6 +177,7 @@ class MainWindow(QMainWindow):
         self.batch_input.setMaximumHeight(130)
         self.batch_input.setVisible(False)
         self.add_queue = QPushButton("添加到队列")
+        self.add_queue.setObjectName("primaryButton")
         self.add_queue.setVisible(False)
         self.mode_hint = QLabel()
         self.mode_hint.setObjectName("cardSubtitle")
@@ -161,7 +190,7 @@ class MainWindow(QMainWindow):
         self.count = self._spin_box(1, 10000, 100)
         self.min_width = self._spin_box(1, 10000, 800)
         self.min_height = self._spin_box(1, 10000, 800)
-        self.interval = QDoubleSpinBox()
+        self.interval = NoWheelDoubleSpinBox()
         self.interval.setRange(0, 60)
         self.interval.setValue(1)
         self.interval.setSingleStep(0.5)
@@ -180,10 +209,15 @@ class MainWindow(QMainWindow):
         self.start.setObjectName("primaryButton")
         self.start.setMinimumHeight(44)
         self.pause = QPushButton("暂停")
+        self.pause.setObjectName("secondaryButton")
         self.resume = QPushButton("继续")
+        self.resume.setObjectName("secondaryButton")
         self.stop = QPushButton("停止")
+        self.stop.setObjectName("secondaryButton")
         self.start_queue = QPushButton("开始队列")
+        self.start_queue.setObjectName("primaryButton")
         self.login_browser = QPushButton("打开浏览器 / 登录")
+        self.login_browser.setObjectName("secondaryButton")
         self.open_dir = QPushButton("打开保存目录")
         self.open_dir.setIcon(QIcon(resource_path("icons/folder.svg")))
 
@@ -210,44 +244,111 @@ class MainWindow(QMainWindow):
         self.queue_table.setHorizontalHeaderLabels(["序号", "平台", "模式", "来源", "数量", "状态"])
         self.queue_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         self.queue_table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
+        self.queue_table.setSelectionMode(QTableWidget.SelectionMode.ExtendedSelection)
         self.queue_table.setMinimumHeight(150)
+        self.delete_selected = QPushButton("删除选中任务")
+        self.delete_selected.setObjectName("secondaryButton")
+        self.clear_pending = QPushButton("清空等待任务")
+        self.clear_pending.setObjectName("secondaryButton")
         self.clear_completed = QPushButton("清空已完成任务")
+        self.clear_completed.setObjectName("secondaryButton")
+        self.history_table = QTableWidget(0, 8)
+        self.history_table.setHorizontalHeaderLabels(["时间", "平台", "模式", "来源", "目标", "成功", "重复", "状态"])
+        self.history_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        self.history_table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
+        self.history_table.setSelectionMode(QTableWidget.SelectionMode.ExtendedSelection)
+        self.history_table.setMinimumHeight(170)
+        self.history_empty = QLabel("暂无任务历史")
+        self.history_empty.setObjectName("emptyState")
+        self.history_empty.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.history_empty.setMinimumHeight(110)
+        self.refresh_history = QPushButton("刷新历史")
+        self.delete_history = QPushButton("删除选中记录")
+        self.delete_history.setObjectName("secondaryButton")
+        self.clear_history = QPushButton("清空全部历史")
+        self.clear_history.setObjectName("warningButton")
+        self.open_history_dir = QPushButton("打开历史目录")
+        self.recollect_history = QPushButton("重新采集")
+        self.retry_history = QPushButton("重试失败任务")
+        self.advanced_toggle = QToolButton()
+        self.advanced_toggle.setText("高级筛选  ›")
+        self.advanced_toggle.setCheckable(True)
+        self.advanced_toggle.setObjectName("sectionToggle")
+        self.advanced_panel = QWidget()
+        self.advanced_panel.setVisible(False)
         self._platform_changed(0)
 
     @staticmethod
     def _spin_box(minimum: int, maximum: int, value: int) -> QSpinBox:
-        control = QSpinBox()
+        control = NoWheelSpinBox()
         control.setRange(minimum, maximum)
         control.setValue(value)
         control.setMinimumHeight(36)
         return control
 
     def _build_window(self) -> None:
-        scroll = QScrollArea()
-        scroll.setWidgetResizable(True)
-        scroll.setFrameShape(QFrame.Shape.NoFrame)
-        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         container = QWidget()
         container.setObjectName("page")
         layout = QVBoxLayout(container)
         layout.setContentsMargins(34, 28, 34, 24)
         layout.setSpacing(18)
         layout.addLayout(self._build_header())
-        layout.addWidget(self._build_settings_card())
-        layout.addWidget(self._build_queue_card())
+        self.tabs = QTabWidget()
+        self.tabs.addTab(self._build_new_task_page(), "新建任务")
+        self.tabs.addTab(self._build_queue_page(), "任务队列")
+        self.tabs.addTab(self._build_history_page(), "任务历史")
+        layout.addWidget(self.tabs, 1)
+        self.setCentralWidget(container)
+
+    @staticmethod
+    def _scroll_page(content: QWidget) -> QScrollArea:
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        scroll.setWidget(content)
+        return scroll
+
+    def _build_new_task_page(self) -> QScrollArea:
+        content = QWidget()
+        content.setObjectName("page")
+        layout = QVBoxLayout(content)
+        layout.setContentsMargins(0, 20, 12, 24)
+        layout.setSpacing(16)
+        layout.addWidget(self._build_source_card())
+        layout.addWidget(self._build_target_card())
+        layout.addWidget(self._build_download_card())
+        layout.addWidget(self._build_advanced_card())
         layout.addWidget(self._build_actions_card())
         layout.addWidget(self._build_progress_card())
-        layout.addWidget(self._build_log_card(), 1)
+        layout.addWidget(self._build_log_card())
         layout.addLayout(self._build_footer())
-        scroll.setWidget(container)
-        self.setCentralWidget(scroll)
+        return self._scroll_page(content)
+
+    def _build_queue_page(self) -> QScrollArea:
+        content = QWidget()
+        content.setObjectName("page")
+        layout = QVBoxLayout(content)
+        layout.setContentsMargins(0, 20, 12, 24)
+        layout.addWidget(self._build_queue_card())
+        layout.addStretch(1)
+        return self._scroll_page(content)
+
+    def _build_history_page(self) -> QScrollArea:
+        content = QWidget()
+        content.setObjectName("page")
+        layout = QVBoxLayout(content)
+        layout.setContentsMargins(0, 20, 12, 24)
+        layout.addWidget(self._build_history_card())
+        layout.addStretch(1)
+        return self._scroll_page(content)
 
     def _build_header(self) -> QVBoxLayout:
         layout = QVBoxLayout()
         layout.setSpacing(4)
         title = QLabel("社媒素材采集器")
         title.setObjectName("pageTitle")
-        subtitle = QLabel("批量采集并保存高质量社交媒体图片素材到本地")
+        subtitle = QLabel("配置任务、执行队列并追踪社交媒体素材采集历史")
         subtitle.setObjectName("pageSubtitle")
         layout.addWidget(title)
         layout.addWidget(subtitle)
@@ -259,6 +360,8 @@ class MainWindow(QMainWindow):
         layout.addWidget(self.platform)
         layout.addWidget(self._field_label("采集模式"))
         layout.addWidget(self.mode)
+        layout.addWidget(self.search_scope_label)
+        layout.addWidget(self.search_scope)
         layout.addWidget(self.media_type_label)
         layout.addWidget(self.media_type)
         layout.addWidget(self.source_label)
@@ -290,6 +393,72 @@ class MainWindow(QMainWindow):
         layout.addWidget(output_widget)
         return card
 
+    def _build_source_card(self) -> QFrame:
+        card, layout = self._card("采集来源", "先选择平台和采集模式，再配置目标内容。")
+        grid = QGridLayout()
+        grid.setHorizontalSpacing(12)
+        grid.addWidget(self._parameter_field("平台", self.platform), 0, 0)
+        grid.addWidget(self._parameter_field("采集模式", self.mode), 0, 1)
+        grid.addWidget(self._parameter_field_with_label(self.media_type_label, self.media_type), 0, 2)
+        for column in range(3):
+            grid.setColumnStretch(column, 1)
+        layout.addLayout(grid)
+        return card
+
+    @staticmethod
+    def _parameter_field_with_label(label: QLabel, control: QWidget) -> QWidget:
+        widget = QWidget()
+        layout = QVBoxLayout(widget)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(5)
+        layout.addWidget(label)
+        layout.addWidget(control)
+        return widget
+
+    def _build_target_card(self) -> QFrame:
+        card, layout = self._card("目标内容", "单任务填写一项；批量任务每行填写一个关键词或作者。")
+        layout.addWidget(self.source_label)
+        layout.addWidget(self.keyword)
+        layout.addWidget(self.search_scope_field)
+        layout.addWidget(self.current_page_info)
+        self.batch_mode.setObjectName("modeSwitch")
+        layout.addWidget(self.batch_mode)
+        layout.addWidget(self.batch_input)
+        layout.addWidget(self.add_queue)
+        layout.addWidget(self.mode_hint)
+        layout.addWidget(self.only_author)
+        layout.addWidget(self.only_prompt)
+        return card
+
+    def _build_download_card(self) -> QFrame:
+        card, layout = self._card("下载设置", "设置本次任务的目标数量和固定保存根目录。")
+        grid = QGridLayout()
+        grid.addWidget(self._parameter_field("下载数量", self.count), 0, 0)
+        grid.setColumnStretch(0, 1)
+        layout.addLayout(grid)
+        layout.addWidget(self._field_label("保存目录"))
+        output_row = QHBoxLayout()
+        output_row.setSpacing(10)
+        output_row.addWidget(self.output, 1)
+        output_row.addWidget(self.choose)
+        output_widget = QWidget()
+        output_widget.setLayout(output_row)
+        layout.addWidget(output_widget)
+        return card
+
+    def _build_advanced_card(self) -> QFrame:
+        card, layout = self._card("高级筛选", "默认收起；用于控制素材尺寸与请求节奏。")
+        layout.addWidget(self.advanced_toggle, 0, Qt.AlignmentFlag.AlignLeft)
+        advanced_layout = QGridLayout(self.advanced_panel)
+        advanced_layout.setHorizontalSpacing(12)
+        advanced_layout.addWidget(self._parameter_field("最低宽度", self.min_width), 0, 0)
+        advanced_layout.addWidget(self._parameter_field("最低高度", self.min_height), 0, 1)
+        advanced_layout.addWidget(self._parameter_field("下载间隔", self.interval), 0, 2)
+        for column in range(3):
+            advanced_layout.setColumnStretch(column, 1)
+        layout.addWidget(self.advanced_panel)
+        return card
+
     def _build_actions_card(self) -> QFrame:
         card, layout = self._card("操作", "任务运行期间，界面始终保持可响应")
         buttons = QHBoxLayout()
@@ -298,7 +467,6 @@ class MainWindow(QMainWindow):
         buttons.addWidget(self.pause)
         buttons.addWidget(self.resume)
         buttons.addWidget(self.stop)
-        buttons.addWidget(self.start_queue)
         buttons.addWidget(self.login_browser)
         buttons.addStretch(1)
         layout.addLayout(buttons)
@@ -308,8 +476,26 @@ class MainWindow(QMainWindow):
         card, layout = self._card("任务队列", "批量任务按顺序执行，同一时间只运行一个采集任务。")
         layout.addWidget(self.queue_table)
         actions = QHBoxLayout()
-        actions.addStretch(1)
+        actions.addWidget(self.delete_selected)
+        actions.addWidget(self.clear_pending)
         actions.addWidget(self.clear_completed)
+        actions.addStretch(1)
+        actions.addWidget(self.start_queue)
+        layout.addLayout(actions)
+        return card
+
+    def _build_history_card(self) -> QFrame:
+        card, layout = self._card("任务历史", "记录单任务与队列任务；重新采集会创建新的任务记录。")
+        layout.addWidget(self.history_table)
+        layout.addWidget(self.history_empty)
+        actions = QHBoxLayout()
+        actions.addWidget(self.delete_history)
+        actions.addWidget(self.clear_history)
+        actions.addStretch(1)
+        actions.addWidget(self.refresh_history)
+        actions.addWidget(self.open_history_dir)
+        actions.addWidget(self.recollect_history)
+        actions.addWidget(self.retry_history)
         layout.addLayout(actions)
         return card
 
@@ -397,9 +583,28 @@ class MainWindow(QMainWindow):
         self.batch_mode.toggled.connect(self._toggle_batch_mode)
         self.add_queue.clicked.connect(self.add_batch_tasks)
         self.start_queue.clicked.connect(self.start_queue_tasks)
+        self.delete_selected.clicked.connect(self.delete_selected_tasks)
+        self.clear_pending.clicked.connect(self.clear_pending_tasks)
         self.clear_completed.clicked.connect(self.clear_completed_tasks)
+        self.advanced_toggle.toggled.connect(self._toggle_advanced)
+        self.refresh_history.clicked.connect(self._refresh_history)
+        self.delete_history.clicked.connect(self.delete_selected_history)
+        self.clear_history.clicked.connect(self.clear_all_history)
+        self.open_history_dir.clicked.connect(self.open_history_directory)
+        self.recollect_history.clicked.connect(self.recollect_selected)
+        self.retry_history.clicked.connect(self.retry_selected)
+        self.history_table.itemSelectionChanged.connect(self._history_selection_changed)
         self.platform.currentIndexChanged.connect(self._platform_changed)
         self.mode.currentIndexChanged.connect(self._mode_changed)
+        self.search_scope.currentIndexChanged.connect(self._search_scope_changed)
+
+    def _search_scope_changed(self, _index: int) -> None:
+        if self.platform.currentData() == "x" and self.mode.currentData() == "search":
+            self._search_scope_state = str(self.search_scope.currentData() or "media")
+
+    def _toggle_advanced(self, expanded: bool) -> None:
+        self.advanced_panel.setVisible(expanded)
+        self.advanced_toggle.setText("高级筛选  ‹" if expanded else "高级筛选  ›")
 
     def _platform_changed(self, _index: int) -> None:
         self._input_state.remember(self.keyword.text())
@@ -408,6 +613,7 @@ class MainWindow(QMainWindow):
         self.mode.clear()
         if platform == "x":
             self.mode.addItem("作者主页", "author")
+            self.mode.addItem("关键词搜索", "search")
             self.mode.addItem("首页推荐", "home")
         else:
             self.mode.addItem("关键词搜索", "search")
@@ -423,43 +629,84 @@ class MainWindow(QMainWindow):
         self.keyword.blockSignals(True)
         self.keyword.setText(restored_value)
         self.keyword.blockSignals(False)
+        self.current_page_info.setVisible(False)
         if platform == "x":
             author_mode = mode == "author"
-            self.source_label.setText("作者用户名 / 主页地址")
-            self.source_label.setVisible(author_mode)
-            self.keyword.setVisible(author_mode)
-            self.keyword.setEnabled(author_mode)
-            self.keyword.setPlaceholderText("@username 或 https://x.com/username")
-            self.mode_hint.setText("从该 X 作者主页向下采集图片内容。" if author_mode else "从 X 首页‘为你推荐’内容流向下采集。")
+            search_mode = mode == "search"
+            source_mode = author_mode or search_mode
+            self.source_label.setText("作者用户名 / 主页地址" if author_mode else "搜索关键词")
+            self.source_label.setVisible(source_mode)
+            self.keyword.setVisible(source_mode)
+            self.keyword.setEnabled(source_mode)
+            self.keyword.setPlaceholderText(
+                "@username 或 https://x.com/username" if author_mode else "输入 X 搜索关键词"
+            )
+            self.mode_hint.setText(
+                "从该 X 作者主页向下采集图片内容。" if author_mode
+                else "根据关键词打开 X 搜索结果并从媒体内容流开始采集。" if search_mode
+                else "从 X 首页‘为你推荐’内容流向下采集。"
+            )
             self.only_author.setVisible(author_mode)
             self.only_author.setEnabled(author_mode)
             self.only_prompt.setVisible(True)
             self.only_prompt.setEnabled(True)
             self.media_type_label.setVisible(True)
             self.media_type.setVisible(True)
+            self.search_scope_label.setVisible(search_mode)
+            self.search_scope.setVisible(search_mode)
+            self.search_scope_field.setVisible(search_mode)
+            if search_mode:
+                self.search_scope.blockSignals(True)
+                index = self.search_scope.findData(self._search_scope_state)
+                if index >= 0:
+                    self.search_scope.setCurrentIndex(index)
+                self.search_scope.blockSignals(False)
             self._update_batch_controls()
+            if not source_mode:
+                self.source_label.setVisible(False)
+                self.keyword.setVisible(False)
             return
+
         self.source_label.setText("搜索关键词")
-        self.source_label.setVisible(True)
-        self.keyword.setVisible(True)
         search = mode == "search"
+        current_page = mode == "current_page"
+        self.source_label.setVisible(search)
+        self.keyword.setVisible(search)
         self.keyword.setEnabled(search)
-        self.keyword.setPlaceholderText("输入 Pinterest 搜索关键词" if search else "此模式不需要关键词")
-        self.mode_hint.setText({
-            "search": "根据关键词打开 Pinterest 搜索结果并从顶部开始采集。",
-            "home": "从 Pinterest 首页推荐流开始采集，不需要关键词。",
-            "current_page": "请先在 Pinterest 浏览器中打开目标页面，再点击开始下载；程序不会自动切换页面。",
-        }.get(mode, ""))
+        self.keyword.setPlaceholderText("输入 Pinterest 搜索关键词")
+        if current_page:
+            message = "当前页面模式\n请先打开 Pinterest 浏览器并进入目标页面，程序将从当前页面开始采集。"
+            if self.browser_manager.is_running():
+                try:
+                    url = self.browser_manager.current_page_url()
+                except Exception:
+                    url = ""
+                if url:
+                    message += f"\n\n当前页面：\n{url}"
+            self.current_page_info.setText(message)
+            self.current_page_info.setVisible(True)
+        else:
+            self.mode_hint.setText(
+                "根据关键词打开 Pinterest 搜索结果并从顶部开始采集。" if search
+                else "从 Pinterest 首页推荐流开始采集，不需要关键词。"
+            )
         self.only_author.setVisible(False)
         self.only_prompt.setVisible(False)
-        self.media_type_label.setVisible(False)
-        self.media_type.setVisible(False)
+        self.media_type_label.setVisible(True)
+        self.media_type.setVisible(True)
+        self.search_scope_label.setVisible(False)
+        self.search_scope.setVisible(False)
+        self.search_scope_field.setVisible(False)
         self._update_batch_controls()
+        if current_page:
+            self.source_label.setVisible(False)
+            self.keyword.setVisible(False)
 
     def _batch_supported(self) -> bool:
         return (self.platform.currentData(), self.mode.currentData()) in {
             ("pinterest", "search"),
             ("x", "author"),
+            ("x", "search"),
         }
 
     def _update_batch_controls(self, running: bool = False) -> None:
@@ -512,8 +759,10 @@ class MainWindow(QMainWindow):
     def _task_config_from_form(self) -> TaskConfig:
         platform = str(self.platform.currentData())
         mode = str(self.mode.currentData())
+        source_text = self.keyword.text()
+        is_search = mode == "search"
         return TaskConfig(
-            keyword=self.keyword.text() if platform == "pinterest" else "",
+            keyword=source_text if is_search and platform == "pinterest" else "",
             target_count=self.count.value(),
             output_root=self._save_root(),
             min_width=self.min_width.value(),
@@ -521,9 +770,10 @@ class MainWindow(QMainWindow):
             interval_seconds=self.interval.value(),
             collection_mode=mode,
             platform=platform,
-            source_identifier=self.keyword.text() if platform == "x" and mode == "author" else "",
+            source_identifier=source_text if platform == "x" and mode in {"author", "search"} else "",
             only_author_content=self.only_author.isChecked() if mode == "author" else False,
-            media_type=str(self.media_type.currentData()) if platform == "x" else "image",
+            media_type=str(self.media_type.currentData()),
+            search_scope=str(self.search_scope.currentData()) if platform == "x" and mode == "search" else "media",
             only_prompt_posts=self.only_prompt.isChecked() if platform == "x" else False,
         )
 
@@ -549,10 +799,51 @@ class MainWindow(QMainWindow):
         self.batch_input.clear()
         self.append_log(f"已添加 {len(configs)} 个批量任务。")
 
+    def _selected_queue_tasks(self) -> list[QueueTask]:
+        rows = sorted({index.row() for index in self.queue_table.selectionModel().selectedRows()})
+        return [self.queue_tasks[row] for row in rows if 0 <= row < len(self.queue_tasks)]
+
+    def delete_selected_tasks(self) -> None:
+        selected = self._selected_queue_tasks()
+        if not selected:
+            QMessageBox.information(self, "任务队列", "请先选择要删除的任务。")
+            return
+        try:
+            remaining = remove_queue_tasks(self.queue_tasks, {task.task_id for task in selected})
+        except ValueError as exc:
+            QMessageBox.warning(self, "无法删除任务", str(exc))
+            return
+        # Preserve the list object held by QueueRunner while removing items.
+        self.queue_tasks[:] = remaining
+        self.queue_store.save(self.queue_tasks)
+        self._refresh_queue_table()
+        self.append_log(f"已删除 {len(selected)} 个队列任务。")
+
+    def clear_pending_tasks(self) -> None:
+        pending_count = sum(task.status == "pending" for task in self.queue_tasks)
+        if not pending_count:
+            QMessageBox.information(self, "任务队列", "当前没有等待任务。")
+            return
+        answer = QMessageBox.question(
+            self,
+            "清空等待任务",
+            "确定清空所有等待任务吗？",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+        # Keep running/completed/failed/stopped tasks and preserve Runner's
+        # live list reference when this is clicked during queue execution.
+        self.queue_tasks[:] = [task for task in self.queue_tasks if task.status != "pending"]
+        self.queue_store.save(self.queue_tasks)
+        self._refresh_queue_table()
+        self.append_log(f"已清空 {pending_count} 个等待任务。")
+
     def clear_completed_tasks(self) -> None:
         if self.queue_runner and self.queue_runner.isRunning():
             return
-        self.queue_tasks = [task for task in self.queue_tasks if task.status != "completed"]
+        self.queue_tasks[:] = [task for task in self.queue_tasks if task.status != "completed"]
         self.queue_store.save(self.queue_tasks)
         self._refresh_queue_table()
 
@@ -566,18 +857,19 @@ class MainWindow(QMainWindow):
             QMessageBox.information(self, "任务队列", "队列中没有等待执行的任务。")
             return
         profile = browser_profile_directory()
-        if BrowserSession.profile_is_locked(profile):
+        if not self.browser_manager.is_running() and BrowserSession.profile_is_locked(profile):
             QMessageBox.warning(self, "无法开始队列", "请先关闭登录浏览器，再开始采集。")
             return
         for task in self.queue_tasks:
             if task.status == "pending":
                 task.config.output_root.mkdir(parents=True, exist_ok=True)
         self.queue_store.save(self.queue_tasks)
-        self.queue_runner = QueueRunner(self.queue_tasks, profile, self.queue_store)
+        self.queue_runner = QueueRunner(self.queue_tasks, profile, self.queue_store, self.browser_manager)
         self.queue_runner.log.connect(self.append_log)
         self.queue_runner.stats.connect(self.update_stats)
         self.queue_runner.task_started.connect(self.task_started)
         self.queue_runner.task_status.connect(self._queue_task_status)
+        self.queue_runner.control_status.connect(self._control_status_changed)
         self.queue_runner.finished_queue.connect(self._queue_finished)
         self._set_running(True)
         self.append_log("开始按顺序执行任务队列。")
@@ -592,9 +884,148 @@ class MainWindow(QMainWindow):
         self._refresh_queue_table()
 
     def _queue_finished(self) -> None:
-        self.append_log("任务队列执行结束。")
+        was_stopping = self._control_state == "stopping"
+        if was_stopping:
+            self.status.setText("已停止")
+        self.append_log("任务已停止" if was_stopping else "任务队列执行结束。")
+        self._refresh_history()
         self.queue_runner = None
         self._set_running(False)
+
+    def _refresh_history(self) -> None:
+        labels = {
+            "pending": "等待", "running": "运行中", "paused": "已暂停",
+            "completed": "已完成", "failed": "失败", "stopped": "已停止",
+            "interrupted": "中断（未自动恢复）",
+        }
+        rows = self.database.list_history()
+        has_history = bool(rows)
+        self.history_table.setVisible(has_history)
+        self.history_empty.setVisible(not has_history)
+        self.history_table.setRowCount(len(rows))
+        for row_index, row in enumerate(rows):
+            values = [
+                str(row.get("finished_at") or row.get("started_at") or ""),
+                str(row.get("platform") or ""),
+                str(row.get("collection_mode") or ""),
+                str(row.get("source_value") or ""),
+                str(row.get("target_count") or 0),
+                str(row.get("success_count") or 0),
+                str(row.get("duplicate_count") or 0),
+                labels.get(str(row.get("status") or ""), str(row.get("status") or "")),
+            ]
+            for column, value in enumerate(values):
+                item = QTableWidgetItem(value)
+                if column == 0:
+                    item.setData(Qt.ItemDataRole.UserRole, str(row.get("task_id") or ""))
+                self.history_table.setItem(row_index, column, item)
+        self.history_table.resizeColumnsToContents()
+        self._history_selection_changed()
+
+    def _selected_history_ids(self) -> list[str]:
+        ids: list[str] = []
+        for index in self.history_table.selectionModel().selectedRows():
+            item = self.history_table.item(index.row(), 0)
+            task_id = str(item.data(Qt.ItemDataRole.UserRole) or "") if item else ""
+            if task_id and task_id not in ids:
+                ids.append(task_id)
+        return ids
+
+    def _active_history_ids(self) -> set[str]:
+        ids: set[str] = set()
+        if self._task_active and self.worker:
+            ids.add(self.worker.engine.config.task_id)
+        if self._task_active and self.queue_runner and self.queue_runner.current_task:
+            ids.add(self.queue_runner.current_task.task_id)
+        return ids
+
+    def delete_selected_history(self) -> None:
+        task_ids = self._selected_history_ids()
+        if not task_ids:
+            QMessageBox.information(self, "任务历史", "请先选择要删除的历史记录。")
+            return
+        active_ids = self._active_history_ids()
+        rows = [self.database.get_history(task_id) for task_id in task_ids]
+        if any(
+            row and (str(row.get("status") or "") == "running" or task_id in active_ids)
+            for task_id, row in zip(task_ids, rows)
+        ):
+            QMessageBox.warning(self, "无法删除历史", "运行中的任务不能删除历史记录，请先停止任务。")
+            return
+        self.database.delete_task_history(task_ids)
+        self._refresh_history()
+
+    def clear_all_history(self) -> None:
+        rows = self.database.list_history()
+        if not rows:
+            self._refresh_history()
+            return
+        active_ids = self._active_history_ids()
+        if any(
+            str(row.get("status") or "") == "running" or str(row.get("task_id") or "") in active_ids
+            for row in rows
+        ):
+            QMessageBox.warning(self, "无法清空历史", "运行中的任务不能删除历史记录，请先停止任务。")
+            return
+        dialog = QMessageBox(self)
+        dialog.setWindowTitle("清空全部历史")
+        dialog.setText("确定清空全部任务历史吗？\n此操作只删除历史记录，不会删除已下载的图片、视频或任务文件夹。")
+        cancel = dialog.addButton("取消", QMessageBox.ButtonRole.RejectRole)
+        confirm = dialog.addButton("确定清空", QMessageBox.ButtonRole.AcceptRole)
+        dialog.exec()
+        if dialog.clickedButton() is not confirm:
+            return
+        self.database.clear_task_history()
+        self._refresh_history()
+
+    def _selected_history_row(self) -> dict[str, object] | None:
+        row_index = self.history_table.currentRow()
+        if row_index < 0:
+            return None
+        item = self.history_table.item(row_index, 0)
+        task_id = item.data(Qt.ItemDataRole.UserRole) if item else ""
+        return self.database.get_history(str(task_id)) if task_id else None
+
+    def _history_config(self, row: dict[str, object] | None) -> TaskConfig | None:
+        if not row:
+            return None
+        return self.database.load_task_config(str(row.get("task_id") or ""))
+
+    def open_history_directory(self) -> None:
+        row = self._selected_history_row()
+        target = Path(str(row.get("task_output_dir") or "")) if row else None
+        if target and target.exists():
+            os.startfile(str(target))
+
+    def _start_history_task(self, retry_only: bool) -> None:
+        row = self._selected_history_row()
+        config = self._history_config(row)
+        if not row or not config:
+            QMessageBox.information(self, "任务历史", "请先选择一条任务历史记录。")
+            return
+        if retry_only and str(row.get("status") or "") not in {"failed", "stopped", "interrupted"}:
+            QMessageBox.information(self, "任务历史", "只有失败、停止或中断的任务可以重试。")
+            return
+        config = replace(config, task_id=uuid4().hex, status="pending")
+        self._start_config(config)
+
+    def recollect_selected(self) -> None:
+        self._start_history_task(False)
+
+    def retry_selected(self) -> None:
+        self._start_history_task(True)
+
+    def _history_selection_changed(self) -> None:
+        row = self._selected_history_row()
+        task_ids = self._selected_history_ids()
+        can_use_history = not self._task_active
+        self.delete_history.setEnabled(bool(task_ids))
+        self.open_history_dir.setEnabled(can_use_history and row is not None)
+        self.recollect_history.setEnabled(can_use_history and row is not None)
+        self.retry_history.setEnabled(can_use_history and bool(
+            row and str(row.get("status") or "") in {"failed", "stopped", "interrupted"}
+        ))
+        self.clear_history.setEnabled(bool(self.database.list_history()))
 
     def choose_dir(self) -> None:
         path = QFileDialog.getExistingDirectory(self, "选择图片保存目录", self.output.text())
@@ -603,36 +1034,45 @@ class MainWindow(QMainWindow):
 
     def start_task(self) -> None:
         try:
+            config = self._task_config_from_form()
+        except (ValueError, OSError) as exc:
+            QMessageBox.warning(self, "无法开始", str(exc))
+            return
+        self._start_config(config)
+
+    def _start_config(self, config: TaskConfig) -> None:
+        try:
             if self.queue_runner and self.queue_runner.isRunning():
                 QMessageBox.warning(self, "无法开始", "任务队列正在运行，请先停止队列。")
                 return
-            config = self._task_config_from_form()
             config.validate()
             profile = browser_profile_directory()
-            if BrowserSession.profile_is_locked(profile):
+            if config.canonical_collection_mode() == "current_page" and not self.browser_manager.is_running():
+                QMessageBox.warning(self, "无法开始", "请先点击『打开浏览器 / 登录』，在 Pinterest 中打开需要采集的页面，然后开始下载。")
+                return
+            if not self.browser_manager.is_running() and BrowserSession.profile_is_locked(profile):
                 QMessageBox.warning(self, "无法开始", "请先关闭登录浏览器，再开始采集。")
                 return
             config.output_root.mkdir(parents=True, exist_ok=True)
         except (ValueError, OSError) as exc:
             QMessageBox.warning(self, "无法开始", str(exc))
             return
-        self.worker = Worker(config, profile)
+        self.worker = Worker(config, profile, self.browser_manager)
         self.worker.log.connect(self.append_log)
         self.worker.stats.connect(self.update_stats)
         self.worker.task_started.connect(self.task_started)
+        self.worker.control_status.connect(self._control_status_changed)
         self.worker.done.connect(self.task_done)
         self.worker.failed.connect(self.task_failed)
         self._set_running(True)
+        self.append_log(f"开始任务：{config.canonical_platform()} / {config.canonical_source_value}")
         self.worker.start()
 
     def open_login_browser(self) -> None:
         if self.login_worker and self.login_worker.isRunning():
             return
-        profile = browser_profile_directory()
-        if BrowserSession.profile_is_locked(profile):
-            QMessageBox.warning(self, "无法打开登录浏览器", "请先关闭当前占用专用 Profile 的浏览器，再重试。")
-            return
-        self.login_worker = ChromeLoginWorker(profile, "https://x.com/i/flow/login")
+        target_url = "https://www.pinterest.com/" if self.platform.currentData() == "pinterest" else "https://x.com/i/flow/login"
+        self.login_worker = ChromeLoginWorker(self.browser_manager, target_url)
         self.login_worker.log.connect(self.append_log)
         self.login_worker.failed.connect(lambda message: self.append_log(f"登录浏览器异常：{message}"))
         self.login_worker.finished.connect(lambda: self.login_browser.setEnabled(True))
@@ -641,33 +1081,52 @@ class MainWindow(QMainWindow):
         self.login_worker.start()
 
     def pause_task(self) -> None:
+        if not self._is_task_running() or self._control_state != "running":
+            return
+        self._set_control_state("pausing", "正在暂停...", "已请求暂停任务")
         if self.queue_runner and self.queue_runner.isRunning():
             self.queue_runner.pause()
-            self.append_log("队列当前任务已暂停。")
-            self.status.setText("任务已暂停")
         elif self.worker and self.worker.isRunning():
             self.worker.engine.pause()
-            self.append_log("任务已暂停。")
-            self.status.setText("任务已暂停")
 
     def resume_task(self) -> None:
+        if not self._is_task_running() or self._control_state != "paused":
+            return
+        self._set_control_state("resuming", "正在继续...", "已请求继续任务")
         if self.queue_runner and self.queue_runner.isRunning():
             self.queue_runner.resume()
-            self.append_log("队列当前任务继续执行。")
         elif self.worker and self.worker.isRunning():
             self.worker.engine.resume()
-            self.append_log("任务继续执行。")
 
     def stop_task(self) -> None:
+        if not self._is_task_running() or self._control_state == "stopping":
+            return
+        self._set_control_state("stopping", "正在停止...", "正在停止任务...")
         if self.queue_runner and self.queue_runner.isRunning():
             self.queue_runner.stop()
-            self.append_log("正在停止任务队列……")
         elif self.worker and self.worker.isRunning():
             self.worker.engine.stop()
-            self.append_log("正在安全停止任务……")
+
+    def _is_task_running(self) -> bool:
+        return self._task_active
+
+    def _set_control_state(self, state: str, status: str | None = None, log: str | None = None) -> None:
+        self._control_state = state
+        if status:
+            self.status.setText(status)
+        if log:
+            self.append_log(log)
+        self._refresh_control_buttons()
+
+    def _control_status_changed(self, status: str) -> None:
+        if status == "paused":
+            self._set_control_state("paused", "已暂停", "任务已暂停")
+        elif status == "running":
+            self._set_control_state("running", "运行中", "已继续任务")
 
     def update_stats(self, stats: TaskStats) -> None:
-        self.status.setText(stats.current_status)
+        if self._control_state not in {"pausing", "paused", "resuming", "stopping"}:
+            self.status.setText(stats.current_status)
         self.found_block.set_value(stats.discovered)
         self.success_block.set_value(stats.downloaded)
         self.skipped_block.set_value(stats.skipped)
@@ -690,10 +1149,14 @@ class MainWindow(QMainWindow):
         self.log.moveCursor(QTextCursor.MoveOperation.End)
 
     def task_done(self, directory: str) -> None:
+        was_stopping = self._control_state == "stopping"
+        if was_stopping:
+            self.status.setText("已停止")
         self.task_started(directory)
+        self._refresh_history()
         self.open_dir.setProperty("attention", True)
         self._refresh_style(self.open_dir)
-        self.append_log(f"任务结束：{directory}")
+        self.append_log("任务已停止" if was_stopping else f"任务结束：{directory}")
         self._set_running(False)
 
     def task_started(self, directory: str) -> None:
@@ -704,6 +1167,7 @@ class MainWindow(QMainWindow):
 
     def task_failed(self, message: str) -> None:
         self.append_log(f"任务异常：{message}")
+        self._refresh_history()
         QMessageBox.critical(self, "任务异常", message)
         self._set_running(False)
 
@@ -713,6 +1177,10 @@ class MainWindow(QMainWindow):
             os.startfile(str(target))
 
     def _set_running(self, running: bool) -> None:
+        self._control_state = "running" if running else "idle"
+        self._task_active = running
+        if running:
+            self.status.setText("运行中")
         self.start.setEnabled(not running)
         self.platform.setEnabled(not running)
         self.mode.setEnabled(not running)
@@ -721,6 +1189,7 @@ class MainWindow(QMainWindow):
         self.only_prompt.setEnabled(not running)
         self.start_queue.setEnabled(not running)
         self.clear_completed.setEnabled(not running)
+        self.refresh_history.setEnabled(not running)
         if running:
             self.keyword.setEnabled(False)
             self.only_author.setEnabled(False)
@@ -729,13 +1198,18 @@ class MainWindow(QMainWindow):
             self.only_author.setEnabled(True)
             self._mode_changed(self.mode.currentIndex())
         self._update_batch_controls(running)
-        self.pause.setEnabled(running)
-        self.resume.setEnabled(running)
-        self.stop.setEnabled(running)
+        self._refresh_control_buttons()
+        self._history_selection_changed()
         self.login_browser.setEnabled(not running and not (self.login_worker and self.login_worker.isRunning()))
         if running:
             self.open_dir.setProperty("attention", False)
             self._refresh_style(self.open_dir)
+
+    def _refresh_control_buttons(self) -> None:
+        running = self._is_task_running()
+        self.pause.setEnabled(running and self._control_state == "running")
+        self.resume.setEnabled(running and self._control_state == "paused")
+        self.stop.setEnabled(running and self._control_state != "stopping")
 
     @staticmethod
     def _refresh_style(widget: QWidget) -> None:
@@ -760,11 +1234,13 @@ class MainWindow(QMainWindow):
         if self.login_worker and self.login_worker.isRunning():
             self.login_worker.requestInterruption()
             self.login_worker.wait(5000)
+        self.browser_manager.close()
         event.accept()
 
 
 def run() -> None:
     QApplication.setAttribute(Qt.ApplicationAttribute.AA_UseHighDpiPixmaps)
+    set_windows_app_user_model_id()
     app = QApplication(sys.argv)
     app.setWindowIcon(QIcon(app_icon_path()))
     app.setStyleSheet(stylesheet())

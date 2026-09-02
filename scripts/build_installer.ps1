@@ -13,7 +13,7 @@ function Resolve-Iscc {
         if (Test-Path -LiteralPath $RequestedPath -PathType Leaf) {
             return (Resolve-Path -LiteralPath $RequestedPath).Path
         }
-        throw "找不到指定的 ISCC.exe：$RequestedPath"
+        throw "Requested ISCC.exe was not found: $RequestedPath"
     }
 
     $candidates = @()
@@ -39,7 +39,7 @@ function Resolve-Iscc {
             return (Resolve-Path -LiteralPath $candidate).Path
         }
     }
-    throw '未找到 Inno Setup 6 的 ISCC.exe。请先安装 Inno Setup 6。'
+    throw 'Inno Setup 6 ISCC.exe was not found. Install Inno Setup 6 first.'
 }
 
 $iscc = Resolve-Iscc $IsccPath
@@ -64,7 +64,7 @@ if (-not $isccVersion) {
     $isccVersion = (Get-Item -LiteralPath $iscc).VersionInfo.ProductVersion
 }
 if (-not $isccVersion.StartsWith('6.')) {
-    throw "需要 Inno Setup 6，当前版本：$isccVersion"
+    throw "Inno Setup 6 is required. Current version: $isccVersion"
 }
 
 $distRoot = Join-Path $projectRoot 'dist\SocialMediaCollector'
@@ -87,13 +87,13 @@ $requiredFiles = @(
 )
 foreach ($required in $requiredFiles) {
     if (-not (Test-Path -LiteralPath $required -PathType Leaf)) {
-        throw "缺少安装包输入文件：$required"
+        throw "Required installer input is missing: $required"
     }
 }
 foreach ($dll in $requiredDlls) {
     $path = Join-Path $ffmpegDir $dll
     if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
-        throw "缺少 bundled FFmpeg DLL：$path"
+        throw "Bundled FFmpeg DLL is missing: $path"
     }
 }
 
@@ -101,34 +101,34 @@ $forbidden = @(Get-ChildItem -LiteralPath $distRoot -Recurse -Force -ErrorAction
     Where-Object { $_.FullName -match '(?i)(browser-data|cookie|local.?storage|\.venv|\\tests?($|\\)|\.part|\.env|secret|password|token)' })
 if ($forbidden.Count -gt 0) {
     $names = ($forbidden | Select-Object -ExpandProperty FullName) -join "`n"
-    throw "dist 包含禁止进入安装程序的路径：`n$names"
+    throw "dist contains paths that must not enter the installer:`n$names"
 }
 
 $ffmpegInfo = (& $bundledFfmpeg -version 2>&1 | Out-String)
 if ($ffmpegInfo -notmatch 'n8\.1\.2-44-g7c533d0f86-20260823') {
-    throw 'dist 中的 FFmpeg 不是指定的 LGPL build。'
+    throw 'The FFmpeg in dist is not the specified LGPL build.'
 }
 if ($ffmpegInfo -match '--enable-gpl|--enable-nonfree') {
-    throw 'dist 中的 FFmpeg 包含 GPL 或 nonfree 构建标志。'
+    throw 'The FFmpeg in dist contains GPL or nonfree build flags.'
 }
 
 $iss = Join-Path $projectRoot 'installer\SocialMediaCollector.iss'
-$output = Join-Path $projectRoot 'release\SocialMediaCollector-Setup-v1.0.0.exe'
+$output = Join-Path $projectRoot 'release\SocialMediaCollector-Setup-v2.0.0.exe'
 if (-not (Test-Path -LiteralPath $iss -PathType Leaf)) {
-    throw "缺少 Inno Setup 源文件：$iss"
+    throw "Inno Setup source file is missing: $iss"
 }
 New-Item -ItemType Directory -Force -Path (Split-Path $output) | Out-Null
 if (Test-Path -LiteralPath $output) {
     Remove-Item -LiteralPath $output -Force
 }
 
-Write-Host "使用 Inno Setup $isccVersion：$iscc"
+Write-Host "Using Inno Setup ${isccVersion}: $iscc"
 & $iscc /Qp $iss
 if ($LASTEXITCODE -ne 0) {
-    throw "ISCC 构建失败，退出码：$LASTEXITCODE"
+    throw "ISCC build failed with exit code: $LASTEXITCODE"
 }
 if (-not (Test-Path -LiteralPath $output -PathType Leaf)) {
-    throw "构建完成但未找到安装包：$output"
+    throw "Build completed but installer was not found: $output"
 }
 $size = (Get-Item -LiteralPath $output).Length
-Write-Host "完成：$output ($size bytes)"
+Write-Host "Complete: $output ($size bytes)"

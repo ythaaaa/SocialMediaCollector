@@ -35,12 +35,31 @@ class QueueTask:
         return self.config.canonical_source_value
 
 
+REMOVABLE_QUEUE_STATUSES = frozenset({"pending", "failed", "stopped", "completed"})
+PROTECTED_QUEUE_STATUSES = frozenset({"running", "paused"})
+
+
+def remove_queue_tasks(tasks: list[QueueTask], task_ids: set[str]) -> list[QueueTask]:
+    """Return a queue without selected removable tasks.
+
+    The caller should apply the returned list to the existing queue with
+    slice assignment so a running QueueRunner keeps the same list object.
+    """
+    selected = [task for task in tasks if task.task_id in task_ids]
+    if any(task.status in PROTECTED_QUEUE_STATUSES for task in selected):
+        raise ValueError("运行中或暂停中的任务请先停止，再从队列中删除。")
+    if any(task.status not in REMOVABLE_QUEUE_STATUSES for task in selected):
+        raise ValueError("只能删除等待或已停止的任务。")
+    selected_ids = {task.task_id for task in selected}
+    return [task for task in tasks if task.task_id not in selected_ids]
+
+
 def parse_batch_sources(platform: str, collection_mode: str, text: str) -> list[str]:
     """Parse, trim, validate and de-duplicate one source per non-empty line."""
     platform = platform.strip().lower()
     collection_mode = collection_mode.strip().lower()
-    if (platform, collection_mode) not in {("pinterest", "search"), ("x", "author")}:
-        raise ValueError("批量任务目前仅支持 Pinterest 关键词搜索和 X 作者主页")
+    if (platform, collection_mode) not in {("pinterest", "search"), ("x", "author"), ("x", "search")}:
+        raise ValueError("批量任务目前支持 Pinterest 关键词搜索、X 关键词搜索和 X 作者主页")
 
     sources: list[str] = []
     seen: set[str] = set()
@@ -49,8 +68,10 @@ def parse_batch_sources(platform: str, collection_mode: str, text: str) -> list[
         if not value:
             continue
         try:
-            if platform == "x":
+            if platform == "x" and collection_mode == "author":
                 value = normalize_x_author(value)[0]
+            elif platform == "x" and collection_mode == "search":
+                TaskConfig(value, 1, Path("."), platform="x", collection_mode="search").validate()
             else:
                 TaskConfig(value, 1, Path("."), platform="pinterest", collection_mode="search").validate()
         except ValueError as exc:
@@ -74,7 +95,7 @@ def build_batch_configs(base_config: TaskConfig, text: str) -> list[TaskConfig]:
                 task_id=uuid4().hex,
                 status="pending",
                 keyword=source if platform == "pinterest" else "",
-                source_identifier=source if platform == "x" and mode == "author" else "",
+                source_identifier=source if platform == "x" and mode in {"author", "search"} else "",
                 # Keep the user's selected directory as the immutable save root.
                 # The engine creates the per-task output directory at runtime.
                 output_root=base_config.output_root,

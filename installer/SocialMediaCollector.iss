@@ -1,5 +1,5 @@
 #define MyAppName "Social Media Collector"
-#define MyAppVersion "1.0.0"
+#define MyAppVersion "2.0.0"
 #define MyAppPublisher ""
 #define MyAppExeName "SocialMediaCollector.exe"
 
@@ -17,18 +17,20 @@ PrivilegesRequired=lowest
 ArchitecturesAllowed=x64
 ArchitecturesInstallIn64BitMode=x64
 OutputDir=..\release
-OutputBaseFilename=SocialMediaCollector-Setup-v1.0.0
+OutputBaseFilename=SocialMediaCollector-Setup-v2.0.0
 SetupIconFile=..\assets\app_icon.ico
 UninstallDisplayIcon={app}\{#MyAppExeName}
 VersionInfoDescription={#MyAppName}
 VersionInfoProductName={#MyAppName}
 VersionInfoProductVersion={#MyAppVersion}
-VersionInfoVersion=1.0.0.0
+VersionInfoVersion=2.0.0.0
 WizardStyle=modern
 Compression=lzma2
 SolidCompression=yes
 Uninstallable=yes
 RestartApplications=no
+CloseApplications=yes
+CloseApplicationsFilter=SocialMediaCollector.exe
 PrivilegesRequiredOverridesAllowed=dialog
 
 [Languages]
@@ -44,6 +46,9 @@ Source: "..\third_party\ffmpeg\LICENSE.txt"; DestDir: "{app}\licenses\ffmpeg"; F
 Source: "..\third_party\ffmpeg\NOTICE.txt"; DestDir: "{app}\licenses\ffmpeg"; Flags: ignoreversion
 Source: "..\third_party\ffmpeg\SOURCE_INFO.txt"; DestDir: "{app}\licenses\ffmpeg"; Flags: ignoreversion
 Source: "..\third_party\ffmpeg\BUILD_INFO.txt"; DestDir: "{app}\licenses\ffmpeg"; Flags: ignoreversion
+
+[InstallDelete]
+Type: filesandordirs; Name: "{app}\*"
 
 [Icons]
 Name: "{autodesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; WorkingDir: "{app}"; IconFilename: "{app}\{#MyAppExeName}"; Tasks: desktopicon
