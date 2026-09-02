@@ -13,6 +13,8 @@ $python = Join-Path $projectRoot '.venv\Scripts\python.exe'
 $uiResources = Join-Path $projectRoot 'src\ui\resources'
 $assets = Join-Path $projectRoot 'assets'
 $vendorRuntime = Join-Path $projectRoot 'vendor\ffmpeg'
+$galleryDlWorker = Join-Path $projectRoot 'src\adapters\gallerydl_worker.py'
+$instagramCookieBridgeWorker = Join-Path $projectRoot 'src\adapters\instagram_cookie_bridge_worker.py'
 $ffmpeg = Join-Path $projectRoot 'vendor\ffmpeg\ffmpeg.exe'
 $license = Join-Path $projectRoot 'vendor\ffmpeg\LICENSE.txt'
 $systemIcu = Join-Path $env:SystemRoot 'System32\icuuc.dll'
@@ -37,6 +39,8 @@ $pyInstallerArgs = @(
     '--specpath', 'build',
     '--add-data', "$uiResources;src\ui\resources",
     '--add-data', "$assets;assets",
+    '--add-data', "$galleryDlWorker;src\adapters",
+    '--add-data', "$instagramCookieBridgeWorker;src\adapters",
     '--add-data', "$license;vendor\ffmpeg",
     '--add-binary', "$ffmpeg;vendor\ffmpeg",
     '--icon', (Join-Path $assets 'app_icon.ico'),

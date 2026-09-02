@@ -20,6 +20,7 @@ from src.downloader.hls import HLSDownloadCancelled, HLSDownloadError, HLSDownlo
 from src.downloader.dash import DASHDownloadCancelled, DASHDownloadError, DASHDownloader
 from src.storage import CollectorDatabase, TaskStore
 from src.utils.paths import create_task_directory
+from src.adapters.instagram_gallerydl import InstagramGalleryDlAdapter, gallerydl_poc_enabled
 
 
 class DownloadEngine:
@@ -69,7 +70,8 @@ class DownloadEngine:
     def run(self) -> Path:
         platform = self.config.canonical_platform()
         mode = self.config.canonical_collection_mode()
-        if platform == "instagram":
+        gallerydl_poc = platform == "instagram" and mode == "single_post" and gallerydl_poc_enabled()
+        if platform == "instagram" and not gallerydl_poc:
             if self.browser_manager is None:
                 raise RuntimeError("Instagram 尚未登录，请先点击『打开浏览器 / 登录』，在 Chrome 中完成登录后再开始采集。")
             if self.browser_manager.is_login_running():
@@ -108,7 +110,8 @@ class DownloadEngine:
         self.task_dir = self.task_output_dir
         if self.on_task_dir:
             self.on_task_dir(self.task_output_dir)
-        if platform == "instagram":
+        collector = None
+        if platform == "instagram" and not gallerydl_poc:
             collector = InstagramCollector(self.profile_dir, self.on_log)
         elif platform == "x":
             collector = XCollector(self.profile_dir, self.on_log, self.task_output_dir)
@@ -117,11 +120,13 @@ class DownloadEngine:
         store: TaskStore | None = None
         try:
             self._emit("正在打开浏览器并收集图片")
-            if self.browser_manager and self.browser_manager.is_running() and self.browser_manager.endpoint:
+            if gallerydl_poc:
+                self._emit("正在使用 gallery-dl 发现 Instagram 素材")
+            elif self.browser_manager and self.browser_manager.is_running() and self.browser_manager.endpoint:
                 collector.connect_over_cdp(self.browser_manager.endpoint)
             else:
                 collector.open()
-            page = collector.prepare_current_page() if mode == "current_page" and hasattr(collector, "prepare_current_page") else getattr(collector, "page", None)
+            page = collector.prepare_current_page() if collector is not None and mode == "current_page" and hasattr(collector, "prepare_current_page") else getattr(collector, "page", None)
             if mode == "current_page" and page:
                 self.config = replace(self.config, source_page_url=page.url)
             self.database.start_task(self.config, self.task_output_dir)
@@ -130,7 +135,23 @@ class DownloadEngine:
             with httpx.Client(headers={"User-Agent": "Mozilla/5.0"}, follow_redirects=True, timeout=30) as client:
                 on_candidate = lambda candidate: self._process_candidate(client, candidate, store, known)
                 should_finish = lambda: self.stats.downloaded >= self.config.target_count
-                if platform == "instagram" and mode == "author":
+                if gallerydl_poc:
+                    def process_gallery_candidate(candidate: ImageCandidate) -> bool:
+                        before = self.stats.downloaded
+                        self._process_candidate(client, candidate, store, known)
+                        if self.stats.downloaded > before:
+                            self.on_log("Instagram download success")
+                        return not self.stop_event.is_set() and self.stats.downloaded < self.config.target_count
+
+                    candidates = [None] * InstagramGalleryDlAdapter().collect(
+                        self.config.canonical_source_value,
+                        media_type=self.config.canonical_media_type(),
+                        stop_event=self.stop_event,
+                        pause_event=self.pause_event,
+                        on_candidate=process_gallery_candidate,
+                        on_log=self.on_log,
+                    )
+                elif platform == "instagram" and mode == "author":
                     candidates = collector.collect_author(self.config.canonical_source_value, self.config.target_count, self.config.max_scrolls, self.stop_event.is_set, self._wait_if_paused, self._on_found, on_candidate, should_finish, self.config.canonical_media_type())
                 elif platform == "instagram" and mode == "single_post":
                     candidates = collector.collect_single_post(self.config.canonical_source_value, self.config.target_count, self.config.max_scrolls, self.stop_event.is_set, self._wait_if_paused, self._on_found, on_candidate, should_finish, self.config.canonical_media_type())
@@ -192,7 +213,8 @@ class DownloadEngine:
             self.database.finish_task(self.config, self.stats, "failed", str(exc), self.task_output_dir)
             raise
         finally:
-            collector.close()
+            if collector is not None:
+                collector.close()
         return self.task_dir
 
     def _on_found(self, count: int) -> None:
@@ -325,7 +347,7 @@ class DownloadEngine:
             store.append(record); known.add(digest); self.stats.downloaded += 1
             self.database.register_media(candidate, self.config.canonical_source_value, digest, self.task_dir / "images" / filename, self.config.task_id)
             self.on_log(f"已保存 {filename}（{width}×{height}）")
-        except HLSDownloadCancelled:
+        except (HLSDownloadCancelled, DASHDownloadCancelled):
             return
         except (httpx.HTTPError, HLSDownloadError, DASHDownloadError, UnidentifiedImageError, OSError, ValueError) as exc:
             self.stats.failed += 1; record.status, record.reason = "failed", str(exc); store.append(record)

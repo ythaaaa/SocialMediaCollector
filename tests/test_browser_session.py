@@ -106,3 +106,83 @@ def test_collection_manager_rejects_running_login_chrome_without_killing_it(tmp_
     manager.login_process = Process()
     with pytest.raises(RuntimeError, match="仍在运行"):
         manager.open_collection_browser("https://www.instagram.com/")
+
+
+def test_cdp_readiness_uses_direct_loopback_http(monkeypatch, tmp_path: Path) -> None:
+    calls: list[tuple[str, int, float]] = []
+
+    class Response:
+        status = 200
+        reason = "OK"
+
+        def read(self) -> bytes:
+            return b"{}"
+
+    class Connection:
+        def __init__(self, host: str, port: int, timeout: float) -> None:
+            calls.append((host, port, timeout))
+
+        def request(self, method: str, path: str) -> None:
+            assert (method, path) == ("GET", "/json/version")
+
+        def getresponse(self) -> Response:
+            return Response()
+
+        def close(self) -> None:
+            return None
+
+    monkeypatch.setattr(session_module, "HTTPConnection", Connection)
+    manager = BrowserSessionManager(tmp_path, lambda _: None)
+    manager.port = 9222
+
+    assert manager._endpoint_ready() is True
+    assert calls == [("127.0.0.1", 9222, 0.5)]
+
+
+def test_instagram_collection_logs_startup_diagnostics(monkeypatch, tmp_path: Path) -> None:
+    logs: list[str] = []
+
+    class Process:
+        pid = 1234
+
+        def poll(self):
+            return None
+
+    monkeypatch.setattr(session_module, "find_chrome_path", lambda: "chrome.exe")
+    monkeypatch.setattr(session_module.subprocess, "Popen", lambda command, cwd: Process())
+    monkeypatch.setattr(session_module.BrowserSessionManager, "_endpoint_ready", lambda _self: True)
+    monkeypatch.setattr(session_module.BrowserSessionManager, "_free_port", staticmethod(lambda: 9222))
+    manager = BrowserSessionManager(tmp_path / "browser-data-instagram", logs.append)
+
+    manager.open_collection_browser("https://www.instagram.com/")
+
+    assert any("Instagram Chrome executable=chrome.exe" in message for message in logs)
+    assert any("Instagram profile=" in message for message in logs)
+    assert "Instagram CDP port=9222" in logs
+    assert "Instagram Chrome pid=1234" in logs
+    assert "Instagram CDP waiting..." in logs
+    assert "Instagram CDP ready" in logs
+
+
+def test_instagram_close_kills_owned_chrome_process_tree(monkeypatch, tmp_path: Path) -> None:
+    calls: list[list[str]] = []
+
+    class Process:
+        pid = 4321
+
+        def poll(self):
+            return None
+
+        def wait(self, timeout=None):
+            return 0
+
+    def fake_run(command, **_kwargs):
+        calls.append(command)
+
+    monkeypatch.setattr(session_module.subprocess, "run", fake_run)
+    manager = BrowserSessionManager(tmp_path / "browser-data-instagram", lambda _: None)
+    manager.collection_process = Process()
+
+    manager.close()
+
+    assert calls == [["taskkill", "/PID", "4321", "/T", "/F"]]

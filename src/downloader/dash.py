@@ -227,6 +227,8 @@ class DASHDownloader:
         self.retry_count = retry_count
         self.should_stop = should_stop
         self.should_pause = should_pause
+        self._deadline: float | None = None
+        self._active_process: subprocess.Popen[str] | None = None
 
     def download(self, video_url: str, output_path: Path, audio_url: str = "", width: int | None = None, height: int | None = None, bitrate: int | None = None, codec: str = "", duration: float | None = None) -> DASHResult:
         ffmpeg = find_ffmpeg()
@@ -235,6 +237,7 @@ class DASHDownloader:
         if not video_url.startswith(("http://", "https://")):
             raise DASHDownloadError("Instagram DASH 视频地址无效。")
         self._deadline = time.monotonic() + self._MEDIA_DOWNLOAD_TIMEOUT_SECONDS
+        completed = False
         try:
             with tempfile.TemporaryDirectory(prefix="instagram-dash-") as raw_temp:
                 temp_dir = Path(raw_temp)
@@ -244,11 +247,22 @@ class DASHDownloader:
                 if audio_path:
                     command.extend(["-i", str(audio_path)])
                 command.extend(["-map", "0:v:0", "-map", "1:a:0?" if audio_path else "0:a:0?", "-c", "copy", "-movflags", "+faststart", str(output_path)])
-                result = self._run_ffmpeg(command, output_path)
+                self._run_ffmpeg(command, output_path)
+            if self.should_stop():
+                raise DASHDownloadCancelled()
+            probe = probe_media(output_path, should_stop=self.should_stop, deadline=self._deadline)
+            if self.should_stop():
+                raise DASHDownloadCancelled()
+            completed = True
+            return DASHResult(probe.get("duration") or duration, probe.get("width") or width, probe.get("height") or height, probe.get("bitrate") or bitrate, probe.get("codec") or codec, bool(probe.get("has_audio", bool(audio_url))))
+        except DASHDownloadCancelled:
+            self._remove_file(output_path)
+            raise
         finally:
+            self._terminate_active_process()
             self._deadline = None
-        probe = probe_media(output_path)
-        return DASHResult(probe.get("duration") or duration, probe.get("width") or width, probe.get("height") or height, probe.get("bitrate") or bitrate, probe.get("codec") or codec, bool(probe.get("has_audio", bool(audio_url))))
+            if not completed:
+                self._remove_file(output_path)
 
     def _download_resource(self, url: str, output_path: Path) -> Path:
         if not url.startswith(("http://", "https://")):
@@ -259,6 +273,8 @@ class DASHDownloader:
                 if self.should_stop():
                     raise DASHDownloadCancelled()
                 self.should_pause()
+                if self.should_stop():
+                    raise DASHDownloadCancelled()
                 with self.client.stream("GET", url, headers=self.headers) as response:
                     response.raise_for_status()
                     with output_path.open("wb") as handle:
@@ -273,6 +289,7 @@ class DASHDownloader:
                     raise DASHDownloadError("Instagram DASH 资源为空或不完整。")
                 return output_path
             except DASHDownloadCancelled:
+                self._remove_file(output_path)
                 raise
             except (httpx.HTTPError, OSError) as exc:
                 last_error = exc
@@ -287,6 +304,7 @@ class DASHDownloader:
         stderr_text = ""
         try:
             process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, creationflags=subprocess_creation_flags())
+            self._active_process = process
             while True:
                 if self.should_stop():
                     self._terminate(process)
@@ -308,6 +326,8 @@ class DASHDownloader:
         finally:
             if process is not None and process.poll() is None:
                 self._terminate(process)
+            if self._active_process is process:
+                self._active_process = None
         if process is None or process.returncode != 0 or not output_path.exists() or output_path.stat().st_size < 1024:
             stderr = self._safe_error(stderr_text)
             raise DASHDownloadError(f"FFmpeg 无法封装 Instagram DASH 视频{(': ' + stderr) if stderr else '。'}")
@@ -336,17 +356,57 @@ class DASHDownloader:
             process.kill()
             process.wait()
 
+    def _terminate_active_process(self) -> None:
+        process = self._active_process
+        if process is not None and process.poll() is None:
+            self._terminate(process)
+        self._active_process = None
 
-def probe_media(path: Path) -> dict[str, object]:
+    @staticmethod
+    def _remove_file(path: Path) -> None:
+        try:
+            path.unlink()
+        except FileNotFoundError:
+            pass
+
+
+def probe_media(path: Path, should_stop: Callable[[], bool] | None = None, deadline: float | None = None) -> dict[str, object]:
     ffprobe = find_ffprobe()
     if not ffprobe:
         return {}
+    if should_stop and should_stop():
+        raise DASHDownloadCancelled()
     command = [ffprobe, "-v", "error", "-show_entries", "format=duration:stream=codec_type,codec_name,width,height,bit_rate", "-of", "json", str(path)]
+    process: subprocess.Popen[str] | None = None
+    stdout_text = ""
+    probe_deadline = time.monotonic() + 30
+    if deadline is not None:
+        probe_deadline = min(probe_deadline, deadline)
     try:
-        completed = subprocess.run(command, capture_output=True, text=True, timeout=30, creationflags=subprocess_creation_flags(), check=True)
-        data = json.loads(completed.stdout or "{}")
+        process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, creationflags=subprocess_creation_flags())
+        while True:
+            if should_stop and should_stop():
+                DASHDownloader._terminate(process)
+                raise DASHDownloadCancelled()
+            remaining = probe_deadline - time.monotonic()
+            if remaining <= 0:
+                DASHDownloader._terminate(process)
+                return {}
+            try:
+                stdout_text, _stderr_text = process.communicate(timeout=min(0.2, remaining))
+                break
+            except subprocess.TimeoutExpired:
+                continue
+        if process.returncode != 0:
+            return {}
+        data = json.loads(stdout_text or "{}")
+    except DASHDownloadCancelled:
+        raise
     except (OSError, subprocess.SubprocessError, ValueError, json.JSONDecodeError):
         return {}
+    finally:
+        if process is not None and process.poll() is None:
+            DASHDownloader._terminate(process)
     streams = data.get("streams") or []
     video = next((item for item in streams if item.get("codec_type") == "video"), {})
     return {

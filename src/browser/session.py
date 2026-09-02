@@ -5,11 +5,12 @@ import os
 import socket
 import subprocess
 import time
+from http.client import HTTPConnection
 from pathlib import Path
 from typing import Callable
-from urllib.request import urlopen
 
 from playwright.sync_api import BrowserContext, Page, sync_playwright
+from src.utils.runtime import subprocess_creation_flags
 
 
 def find_chrome_path() -> str | None:
@@ -17,8 +18,8 @@ def find_chrome_path() -> str | None:
     local_app_data = Path(os.environ.get("LOCALAPPDATA", ""))
     candidates = [
         str(local_app_data / "Google" / "Chrome" / "Application" / "chrome.exe") if local_app_data else None,
-        r"C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe",
-        r"C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe",
+        r"C:\Program Files\Google\Chrome\Application\chrome.exe",
+        r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe",
         shutil.which("chrome.exe"),
         shutil.which("chrome"),
     ]
@@ -164,6 +165,10 @@ class BrowserSessionManager:
         self.collection_process: subprocess.Popen[bytes] | None = None
         self.port: int | None = None
         self.chrome_path: str | None = None
+        self._cdp_last_error = ""
+
+    def _is_instagram_profile(self) -> bool:
+        return self.profile_dir.name.casefold() == "browser-data-instagram"
 
     @staticmethod
     def _free_port() -> int:
@@ -176,14 +181,50 @@ class BrowserSessionManager:
         return f"http://127.0.0.1:{self.port}" if self.port else None
 
     def _endpoint_ready(self) -> bool:
-        endpoint = self.endpoint
-        if not endpoint:
+        if not self.port:
             return False
+        connection: HTTPConnection | None = None
         try:
-            with urlopen(f"{endpoint}/json/version", timeout=0.5):
+            # Use a direct loopback connection. urllib's proxy auto-detection
+            # can route 127.0.0.1 through HTTP_PROXY and turn a healthy CDP
+            # endpoint into a false 502 readiness failure.
+            connection = HTTPConnection("127.0.0.1", self.port, timeout=0.5)
+            connection.request("GET", "/json/version")
+            response = connection.getresponse()
+            response.read()
+            if 200 <= response.status < 300:
+                self._cdp_last_error = ""
                 return True
-        except Exception:
-            return False
+            self._cdp_last_error = f"HTTP {response.status} {response.reason}".strip()
+        except Exception as exc:
+            self._cdp_last_error = f"{type(exc).__name__}: {exc}"
+        finally:
+            if connection is not None:
+                connection.close()
+        return False
+
+    def _log_instagram(self, message: str) -> None:
+        if self._is_instagram_profile():
+            self.log(f"Instagram {message}")
+
+    def _terminate_owned_process(self, process: subprocess.Popen[bytes]) -> None:
+        if process.poll() is not None:
+            return
+        if self._is_instagram_profile() and os.name == "nt":
+            subprocess.run(
+                ["taskkill", "/PID", str(process.pid), "/T", "/F"],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                creationflags=subprocess_creation_flags(),
+                check=False,
+            )
+        else:
+            process.terminate()
+        try:
+            process.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.wait()
 
     def is_running(self) -> bool:
         """Return whether the CDP-enabled collection Chrome is running."""
@@ -256,18 +297,34 @@ class BrowserSessionManager:
         self.port = self._free_port()
         self.chrome_path = chrome_path
         command = managed_chrome_command(chrome_path, self.profile_dir, self.port, target_url)
+        self._log_instagram(f"Chrome executable={chrome_path}")
+        self._log_instagram(f"profile={self.profile_dir}")
+        self._log_instagram(f"CDP port={self.port}")
         self.log(f"采集 Chrome 启动参数（仅采集阶段启用 CDP）：{subprocess.list2cmdline(command)}")
-        self.collection_process = subprocess.Popen(command, cwd=str(Path(chrome_path).parent))
+        try:
+            self.collection_process = subprocess.Popen(command, cwd=str(Path(chrome_path).parent))
+        except OSError as exc:
+            self._log_instagram(f"Chrome process exited=True error={type(exc).__name__}: {exc}")
+            self.collection_process = None
+            self.port = None
+            raise RuntimeError(f"Instagram Chrome 启动失败：{exc}") from exc
+        self._log_instagram(f"Chrome pid={getattr(self.collection_process, 'pid', None)}")
+        self._log_instagram("CDP waiting...")
         deadline = time.monotonic() + 12
         while time.monotonic() < deadline:
             if self.collection_process.poll() is not None:
+                exit_code = self.collection_process.poll()
+                self._log_instagram(f"Chrome process exited=True code={exit_code}")
                 self.collection_process = None
                 self.port = None
                 raise RuntimeError("采集 Chrome 启动后立即退出。")
             if self._endpoint_ready():
+                self._log_instagram("CDP ready")
                 self.log(f"采集 Chrome 已打开：{chrome_path}；现在才连接 CDP/Playwright。")
                 return
             time.sleep(0.2)
+        self._log_instagram(f"Chrome process exited={self.collection_process.poll() is not None}")
+        self._log_instagram(f"CDP timeout reason={self._cdp_last_error or '127.0.0.1 CDP endpoint 未返回 ready'}")
         self.close()
         raise RuntimeError("采集 Chrome 启动超时，请检查 Chrome 或专用 Profile 状态。")
 
@@ -300,8 +357,4 @@ class BrowserSessionManager:
         self.chrome_path = None
         for process in (login_process, collection_process):
             if process and process.poll() is None:
-                process.terminate()
-                try:
-                    process.wait(timeout=5)
-                except subprocess.TimeoutExpired:
-                    process.kill()
+                self._terminate_owned_process(process)

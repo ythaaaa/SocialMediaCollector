@@ -2,12 +2,17 @@ from __future__ import annotations
 
 import html
 import os
+import re
 import subprocess
 import sys
+import threading
 import time
+import traceback
 from dataclasses import replace
+from datetime import datetime
 from pathlib import Path
 from uuid import uuid4
+from urllib.parse import urlsplit, urlunsplit
 
 from PySide6.QtCore import QSettings, QSize, Qt, QThread, Signal, QTimer
 from PySide6.QtGui import QCloseEvent, QIcon, QTextCursor
@@ -27,8 +32,93 @@ from src.storage import CollectorDatabase, QueueStore
 from src.tasks import BatchInputError, QueueTask, build_batch_configs, remove_queue_tasks
 from src.ui.input_state import ModeInputState
 from src.ui.resources import app_icon_path, resource_path, set_windows_app_user_model_id, stylesheet
-from src.utils.paths import browser_profile_directory, profile_directory_for_platform
+from src.utils.paths import application_data_directory, browser_profile_directory, profile_directory_for_platform
 from src.version import APP_VERSION
+
+
+_RUNTIME_HOOKS_INSTALLED = False
+
+
+def _sanitize_runtime_text(value: object) -> str:
+    text = str(value or "")
+    for token in re.findall(r"https?://[^\s)]+", text):
+        parsed = urlsplit(token)
+        safe = urlunsplit((parsed.scheme, parsed.netloc, parsed.path, "", ""))
+        text = text.replace(token, safe)
+    return text
+
+
+def _runtime_log_path() -> Path:
+    for root in (Path.cwd(), application_data_directory()):
+        try:
+            directory = root / "logs"
+            directory.mkdir(parents=True, exist_ok=True)
+            return directory / "runtime-crash.log"
+        except OSError:
+            continue
+    return Path("runtime-crash.log")
+
+
+def _write_runtime_exception(exc: BaseException, config: TaskConfig | None = None, context: dict[str, object] | None = None) -> None:
+    details = dict(context or {})
+    if config is not None:
+        details.update(
+            task_id=config.task_id,
+            platform=config.canonical_platform(),
+            collection_mode=config.canonical_collection_mode(),
+        )
+    details.setdefault("task_id", "")
+    details.setdefault("platform", "")
+    details.setdefault("collection_mode", "")
+    lines = [
+        f"timestamp={datetime.now().isoformat(timespec='seconds')}",
+        f"thread={threading.current_thread().name}",
+        f"task_id={_sanitize_runtime_text(details['task_id'])}",
+        f"platform={_sanitize_runtime_text(details['platform'])}",
+        f"collection_mode={_sanitize_runtime_text(details['collection_mode'])}",
+        f"exception_type={type(exc).__name__}",
+        f"message={_sanitize_runtime_text(exc)}",
+        "traceback:",
+        _sanitize_runtime_text("".join(traceback.format_exception(type(exc), exc, exc.__traceback__))),
+        "-" * 80,
+    ]
+    try:
+        _runtime_log_path().open("a", encoding="utf-8").write("\n".join(lines) + "\n")
+    except OSError:
+        pass
+
+
+def _install_runtime_exception_hooks() -> None:
+    global _RUNTIME_HOOKS_INSTALLED
+    if _RUNTIME_HOOKS_INSTALLED:
+        return
+    _RUNTIME_HOOKS_INSTALLED = True
+    previous_sys_hook = sys.excepthook
+
+    def sys_hook(exc_type, exc_value, exc_traceback) -> None:
+        exception = exc_value if isinstance(exc_value, BaseException) else Exception(str(exc_value))
+        _write_runtime_exception(exception)
+        previous_sys_hook(exc_type, exc_value, exc_traceback)
+
+    sys.excepthook = sys_hook
+    previous_thread_hook = getattr(threading, "excepthook", None)
+    if previous_thread_hook is not None:
+        def thread_hook(args) -> None:
+            _write_runtime_exception(args.exc_value)
+            previous_thread_hook(args)
+
+        threading.excepthook = thread_hook
+
+
+class RuntimeApplication(QApplication):
+    """Keep a callback exception from terminating the Qt GUI process."""
+
+    def notify(self, receiver, event) -> bool:  # noqa: N802 - Qt API
+        try:
+            return super().notify(receiver, event)
+        except BaseException as exc:
+            _write_runtime_exception(exc)
+            return False
 
 
 class NoWheelMixin:
@@ -69,8 +159,12 @@ class Worker(QThread):
     def run(self) -> None:
         try:
             self.done.emit(str(self.engine.run()))
-        except Exception as exc:
-            self.failed.emit(str(exc))
+        except BaseException as exc:
+            _write_runtime_exception(exc, self.engine.config)
+            try:
+                self.failed.emit(str(exc) or type(exc).__name__)
+            except BaseException as signal_exc:
+                _write_runtime_exception(signal_exc, self.engine.config, {"callback": "Worker.failed"})
 
 
 class ChromeLoginWorker(QThread):
@@ -100,8 +194,18 @@ class ChromeLoginWorker(QThread):
                 if not running:
                     break
                 time.sleep(0.5)
-        except Exception as exc:
-            self.failed.emit(str(exc))
+        except BaseException as exc:
+            _write_runtime_exception(
+                exc,
+                context={"platform": self.platform, "collection_mode": "login"},
+            )
+            try:
+                self.failed.emit(str(exc) or type(exc).__name__)
+            except BaseException as signal_exc:
+                _write_runtime_exception(
+                    signal_exc,
+                    context={"platform": self.platform, "collection_mode": "login", "callback": "ChromeLoginWorker.failed"},
+                )
 
 
 class StatBlock(QFrame):
@@ -125,6 +229,8 @@ class StatBlock(QFrame):
 
 
 class MainWindow(QMainWindow):
+    browser_log = Signal(str)
+
     def __init__(self) -> None:
         super().__init__()
         self.setWindowTitle(f"社媒素材采集器 v{APP_VERSION}")
@@ -136,7 +242,8 @@ class MainWindow(QMainWindow):
         self.last_task_dir: Path | None = None
         self.settings = QSettings("PinterestLocalDownloader", "SocialMediaCollector")
         self._input_state = ModeInputState()
-        self.browser_manager = BrowserSessionManager(browser_profile_directory(), lambda message: self.append_log(message))
+        self.browser_log.connect(self.append_log, Qt.ConnectionType.QueuedConnection)
+        self.browser_manager = BrowserSessionManager(browser_profile_directory(), self.browser_log.emit)
         self.queue_store = QueueStore()
         self.database = CollectorDatabase()
         self.queue_tasks: list[QueueTask] = []
@@ -1366,9 +1473,10 @@ class MainWindow(QMainWindow):
 
 
 def run() -> None:
+    _install_runtime_exception_hooks()
     QApplication.setAttribute(Qt.ApplicationAttribute.AA_UseHighDpiPixmaps)
     set_windows_app_user_model_id()
-    app = QApplication(sys.argv)
+    app = RuntimeApplication(sys.argv)
     app.setWindowIcon(QIcon(app_icon_path()))
     app.setStyleSheet(stylesheet())
     window = MainWindow()

@@ -6,6 +6,7 @@ from PIL import Image
 
 from src.browser import ImageCandidate
 from src.downloader import engine as engine_module
+from src.downloader.dash import DASHDownloadCancelled
 from src.downloader.engine import DownloadEngine
 from src.downloader.hls import HLSDownloadError
 from src.models import TaskConfig
@@ -336,6 +337,45 @@ def test_video_download_error_only_fails_current_candidate(tmp_path: Path, monke
     assert calls == 2
     assert engine.stats.failed == 1
     assert engine.stats.downloaded == 1
+
+
+def test_dash_cancellation_does_not_record_a_failed_candidate(tmp_path: Path, monkeypatch) -> None:
+    config = TaskConfig(
+        "",
+        1,
+        tmp_path / "output",
+        platform="instagram",
+        source_identifier="https://www.instagram.com/p/ABC123/",
+        collection_mode="single_post",
+        media_type="video",
+        interval_seconds=0,
+    )
+    engine = DownloadEngine(
+        config,
+        tmp_path / "profile",
+        database=CollectorDatabase(tmp_path / "collector.db"),
+    )
+    engine.task_dir = tmp_path / "task"
+    engine.task_dir.mkdir()
+    store = TaskStore(engine.task_dir, config)
+
+    def cancel_download(_client, _candidate, _record, _store, _known) -> None:
+        raise DASHDownloadCancelled()
+
+    monkeypatch.setattr(engine, "_download_video", cancel_download)
+    candidate = ImageCandidate(
+        "",
+        "https://www.instagram.com/reel/ABC123/",
+        platform="instagram",
+        media_type="video",
+        media_url="https://cdn.test/video.mp4",
+    )
+
+    engine._download_one(object(), candidate, store, set())
+
+    assert engine.stats.failed == 0
+    assert store.metadata_path.read_text(encoding="utf-8-sig").count("\n") == 1
+    assert store.failed_path.read_text(encoding="utf-8-sig").count("\n") == 1
 
 
 def test_direct_video_request_preserves_signed_query_but_removes_range_controls() -> None:

@@ -1,7 +1,10 @@
 from pathlib import Path
 
+import pytest
+
 from src.browser.instagram_collector import InstagramCollector
-from src.downloader.dash import parse_mpd, select_best_audio, select_best_video
+from src.downloader import dash as dash_module
+from src.downloader.dash import DASHDownloadCancelled, DASHDownloader, parse_mpd, select_best_audio, select_best_video
 
 
 MPD = """<MPD mediaPresentationDuration="PT15.07S"><Period>
@@ -48,3 +51,108 @@ def test_dash_parser_allows_representation_without_bitrate() -> None:
     manifest = parse_mpd("<MPD><Period><AdaptationSet contentType='video'><Representation id='v'><BaseURL>https://cdn.test/v.mp4</BaseURL></Representation></AdaptationSet></Period></MPD>")
     assert manifest.video[0].base_url == "https://cdn.test/v.mp4"
     assert manifest.video[0].bandwidth is None
+
+
+def test_dash_stop_terminates_ffmpeg_and_cleans_output_and_temp_files(monkeypatch, tmp_path: Path) -> None:
+    state = {"stop": False}
+    processes = []
+    temp_dirs = []
+
+    class FakeProcess:
+        def __init__(self, command, **_kwargs) -> None:
+            self.command = command
+            self.returncode = None
+            self.terminated = False
+            processes.append(self)
+
+        def poll(self):
+            return self.returncode
+
+        def communicate(self, timeout=None):
+            state["stop"] = True
+            raise dash_module.subprocess.TimeoutExpired(self.command[0], timeout)
+
+        def terminate(self) -> None:
+            self.terminated = True
+            self.returncode = -15
+
+        def wait(self, timeout=None):
+            return self.returncode
+
+        def kill(self) -> None:
+            self.returncode = -9
+
+    def fake_resource(_url, path: Path) -> Path:
+        temp_dirs.append(path.parent)
+        path.write_bytes(b"x" * 1024)
+        return path
+
+    monkeypatch.setattr(dash_module, "find_ffmpeg", lambda: "ffmpeg.exe")
+    monkeypatch.setattr(dash_module.subprocess, "Popen", FakeProcess)
+    downloader = DASHDownloader(None, {}, 1, lambda: state["stop"], lambda: None)
+    monkeypatch.setattr(downloader, "_download_resource", fake_resource)
+    output = tmp_path / "videos" / ".0001.mp4.part.mp4"
+    output.parent.mkdir()
+
+    with pytest.raises(DASHDownloadCancelled):
+        downloader.download("https://cdn.test/video.mp4", output, audio_url="https://cdn.test/audio.m4a")
+
+    assert len(processes) == 1
+    assert processes[0].terminated is True
+    assert not output.exists()
+    assert temp_dirs and not temp_dirs[0].exists()
+
+
+def test_dash_stop_terminates_ffprobe_and_cleans_output(monkeypatch, tmp_path: Path) -> None:
+    state = {"stop": False}
+    processes = []
+
+    class FakeProcess:
+        def __init__(self, command, **_kwargs) -> None:
+            self.command = command
+            self.returncode = None
+            self.terminated = False
+            processes.append(self)
+
+        def poll(self):
+            return self.returncode
+
+        def communicate(self, timeout=None):
+            if self.command[0] == "ffprobe.exe":
+                state["stop"] = True
+                raise dash_module.subprocess.TimeoutExpired(self.command[0], timeout)
+            Path(self.command[-1]).write_bytes(b"x" * 1024)
+            self.returncode = 0
+            return "", ""
+
+        def terminate(self) -> None:
+            self.terminated = True
+            self.returncode = -15
+
+        def wait(self, timeout=None):
+            return self.returncode
+
+        def kill(self) -> None:
+            self.returncode = -9
+
+    monkeypatch.setattr(dash_module, "find_ffmpeg", lambda: "ffmpeg.exe")
+    monkeypatch.setattr(dash_module, "find_ffprobe", lambda: "ffprobe.exe")
+    monkeypatch.setattr(dash_module.subprocess, "Popen", FakeProcess)
+    downloader = DASHDownloader(None, {}, 1, lambda: state["stop"], lambda: None)
+
+    def fake_resource(_url, path: Path) -> Path:
+        path.write_bytes(b"x" * 1024)
+        return path
+
+    monkeypatch.setattr(downloader, "_download_resource", fake_resource)
+    output = tmp_path / "videos" / ".0001.mp4.part.mp4"
+    output.parent.mkdir()
+
+    with pytest.raises(DASHDownloadCancelled):
+        downloader.download("https://cdn.test/video.mp4", output)
+
+    assert len(processes) == 2
+    assert processes[0].command[0] == "ffmpeg.exe"
+    assert processes[1].command[0] == "ffprobe.exe"
+    assert processes[1].terminated is True
+    assert not output.exists()
