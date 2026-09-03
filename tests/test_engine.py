@@ -316,6 +316,7 @@ def test_engine_reuses_managed_browser_and_records_current_page_url(tmp_path: Pa
 
 
 def test_engine_routes_instagram_to_shared_collector_and_normalizes_config(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("SMC_INSTAGRAM_LEGACY", "1")
     observed: dict[str, object] = {}
 
     class Collector:
@@ -371,7 +372,7 @@ def test_engine_routes_instagram_to_shared_collector_and_normalizes_config(tmp_p
 
 
 def test_gallerydl_author_keeps_requesting_after_duplicate_and_failed_until_target(tmp_path: Path, monkeypatch) -> None:
-    monkeypatch.setenv("SMC_INSTAGRAM_GALLERYDL_POC", "1")
+    monkeypatch.delenv("SMC_INSTAGRAM_GALLERYDL_POC", raising=False)
     seen: list[str] = []
     candidates = [
         ImageCandidate("", "", platform="instagram", author_username="alice", shortcode="DUP", media_url="dup", media_identity="DUP:0"),
@@ -428,7 +429,7 @@ def test_gallerydl_author_keeps_requesting_after_duplicate_and_failed_until_targ
 
 
 def test_gallerydl_discovered_counts_duplicates_failures_and_successes_before_processing(tmp_path: Path, monkeypatch) -> None:
-    monkeypatch.setenv("SMC_INSTAGRAM_GALLERYDL_POC", "1")
+    monkeypatch.delenv("SMC_INSTAGRAM_GALLERYDL_POC", raising=False)
     candidates = [
         ImageCandidate("", "", platform="instagram", author_username="alice", shortcode="CURRENT_DUP", media_url="current", media_identity="CURRENT_DUP:0"),
         ImageCandidate("", "", platform="instagram", author_username="alice", shortcode="HISTORY_DUP", media_url="history", media_identity="HISTORY_DUP:0"),
@@ -486,7 +487,7 @@ def test_gallerydl_discovered_counts_duplicates_failures_and_successes_before_pr
 
 
 def test_gallerydl_video_filter_counts_twenty_images_as_skipped(tmp_path: Path, monkeypatch) -> None:
-    monkeypatch.setenv("SMC_INSTAGRAM_GALLERYDL_POC", "1")
+    monkeypatch.delenv("SMC_INSTAGRAM_GALLERYDL_POC", raising=False)
     candidates = [
         ImageCandidate("", "", platform="instagram", media_type="image", media_url=f"image-{index}", media_identity=f"IMAGE:{index}")
         for index in range(20)
@@ -536,7 +537,7 @@ def test_gallerydl_video_filter_counts_twenty_images_as_skipped(tmp_path: Path, 
 
 
 def test_gallerydl_author_exhausted_before_target_is_failed(tmp_path: Path, monkeypatch) -> None:
-    monkeypatch.setenv("SMC_INSTAGRAM_GALLERYDL_POC", "1")
+    monkeypatch.delenv("SMC_INSTAGRAM_GALLERYDL_POC", raising=False)
 
     class GalleryAdapter:
         def collect(self, _url, *, on_candidate, **_kwargs):
@@ -573,7 +574,7 @@ def test_gallerydl_author_exhausted_before_target_is_failed(tmp_path: Path, monk
 
 
 def test_gallerydl_hashtag_uses_tag_url_without_collection_chrome(tmp_path: Path, monkeypatch) -> None:
-    monkeypatch.setenv("SMC_INSTAGRAM_GALLERYDL_POC", "1")
+    monkeypatch.delenv("SMC_INSTAGRAM_GALLERYDL_POC", raising=False)
     observed: dict[str, object] = {}
 
     class GalleryAdapter:
@@ -618,8 +619,50 @@ def test_gallerydl_hashtag_uses_tag_url_without_collection_chrome(tmp_path: Path
     assert '"source_hashtag": "aiart"' in task_data
 
 
+@pytest.mark.parametrize("source_url", [
+    "https://www.instagram.com/p/POST123/",
+    "https://www.instagram.com/reel/REEL123/",
+])
+def test_gallerydl_is_default_for_single_post_and_reel_without_environment_flag(tmp_path: Path, monkeypatch, source_url: str) -> None:
+    monkeypatch.delenv("SMC_INSTAGRAM_GALLERYDL_POC", raising=False)
+    monkeypatch.delenv("SMC_INSTAGRAM_LEGACY", raising=False)
+    observed: dict[str, object] = {}
+
+    class GalleryAdapter:
+        def collect(self, url, *, on_candidate, **_kwargs):
+            observed["url"] = url
+            on_candidate(ImageCandidate(
+                "",
+                source_url,
+                platform="instagram",
+                media_type="image",
+                media_url="fixture-image",
+                media_identity="POST:0",
+            ))
+            return 1
+
+    monkeypatch.setattr(engine_module, "InstagramGalleryDlAdapter", GalleryAdapter)
+    config = TaskConfig(
+        "",
+        1,
+        tmp_path / "output",
+        platform="instagram",
+        collection_mode="single_post",
+        source_identifier=source_url,
+        media_type="image",
+        interval_seconds=0,
+    )
+    engine = DownloadEngine(config, tmp_path / "profile", database=CollectorDatabase(tmp_path / "collector.db"))
+    monkeypatch.setattr(engine, "_process_candidate", lambda *_args: setattr(engine.stats, "downloaded", 1))
+
+    engine.run()
+
+    assert observed["url"] == source_url
+    assert engine.stats.downloaded == 1
+
+
 def test_gallerydl_hashtag_exhausted_before_target_is_failed(tmp_path: Path, monkeypatch) -> None:
-    monkeypatch.setenv("SMC_INSTAGRAM_GALLERYDL_POC", "1")
+    monkeypatch.delenv("SMC_INSTAGRAM_GALLERYDL_POC", raising=False)
 
     class GalleryAdapter:
         def collect(self, _url, *, on_candidate, **_kwargs):
@@ -644,7 +687,8 @@ def test_gallerydl_hashtag_exhausted_before_target_is_failed(tmp_path: Path, mon
         engine.run()
 
 
-def test_engine_rejects_instagram_without_manual_login_browser(tmp_path: Path) -> None:
+def test_engine_rejects_instagram_without_manual_login_browser(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("SMC_INSTAGRAM_LEGACY", "1")
     config = TaskConfig(
         "",
         1,
@@ -660,7 +704,8 @@ def test_engine_rejects_instagram_without_manual_login_browser(tmp_path: Path) -
         DownloadEngine(config, tmp_path / "profile", database=CollectorDatabase(tmp_path / "collector.db")).run()
 
 
-def test_engine_rejects_instagram_while_manual_login_browser_is_running(tmp_path: Path) -> None:
+def test_engine_rejects_instagram_while_manual_login_browser_is_running(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("SMC_INSTAGRAM_LEGACY", "1")
     class Manager:
         endpoint = None
 

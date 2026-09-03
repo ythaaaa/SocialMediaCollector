@@ -19,7 +19,7 @@ from src.utils.instagram import normalize_hashtag
 from src.utils.runtime import subprocess_creation_flags
 
 
-POC_ENVIRONMENT_VARIABLE = "SMC_INSTAGRAM_GALLERYDL_POC"
+LEGACY_ENVIRONMENT_VARIABLE = "SMC_INSTAGRAM_LEGACY"
 GALLERYDL_PYTHON_ENVIRONMENT_VARIABLE = "SMC_GALLERYDL_PYTHON"
 GALLERYDL_HOME_ENVIRONMENT_VARIABLE = "SMC_GALLERYDL_HOME"
 DEFAULT_GALLERY_DL_ROOT = Path.home() / "Desktop" / "gallery-dl"
@@ -166,10 +166,10 @@ def _gallerydl_helper_environment() -> dict[str, str]:
     return environment
 
 
-def gallerydl_poc_enabled(environ: dict[str, str] | None = None) -> bool:
-    """Return whether the opt-in PoC flag is enabled."""
+def instagram_legacy_enabled(environ: Mapping[str, str] | None = None) -> bool:
+    """Return whether the legacy Instagram browser collector is requested."""
     values = os.environ if environ is None else environ
-    return values.get(POC_ENVIRONMENT_VARIABLE, "").strip().lower() in {
+    return values.get(LEGACY_ENVIRONMENT_VARIABLE, "").strip().lower() in {
         "1", "true", "yes", "on"
     }
 
@@ -590,7 +590,7 @@ class InstagramGalleryDlAdapter:
                 raise GalleryDlError(ready.get("message") or "gallery-dl helper did not become ready")
             cookie_loaded = bool(ready.get("cookie_loaded"))
             if on_log:
-                on_log(f"Instagram engine=gallery-dl-poc; cookie loaded={'yes' if cookie_loaded else 'no'}")
+                on_log(f"Instagram engine=gallery-dl; cookie loaded={'yes' if cookie_loaded else 'no'}")
             if not cookie_loaded:
                 raise GalleryDlError("Instagram cookie loaded=no; sessionid 未找到")
 

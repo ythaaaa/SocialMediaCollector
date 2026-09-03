@@ -21,7 +21,7 @@ from src.downloader.dash import DASHDownloadCancelled, DASHDownloadError, DASHDo
 from src.storage import CollectorDatabase, TaskStore
 from src.utils.paths import create_task_directory
 from src.utils.instagram import instagram_hashtag_url, normalize_hashtag
-from src.adapters.instagram_gallerydl import GalleryDlError, InstagramGalleryDlAdapter, gallerydl_poc_enabled
+from src.adapters.instagram_gallerydl import GalleryDlError, InstagramGalleryDlAdapter, instagram_legacy_enabled
 
 
 class DownloadEngine:
@@ -75,12 +75,12 @@ class DownloadEngine:
         self._current_task_hashes.clear()
         platform = self.config.canonical_platform()
         mode = self.config.canonical_collection_mode()
-        gallerydl_poc = platform == "instagram" and mode in {"single_post", "author", "hashtag"} and gallerydl_poc_enabled()
+        gallerydl_enabled = platform == "instagram" and mode in {"single_post", "author", "hashtag"} and not instagram_legacy_enabled()
         gallerydl_author_username = ""
         gallerydl_source_hashtag = ""
-        if platform == "instagram" and mode == "hashtag" and not gallerydl_poc:
-            raise RuntimeError("Instagram Hashtag 当前需要设置 SMC_INSTAGRAM_GALLERYDL_POC=1。")
-        if platform == "instagram" and not gallerydl_poc:
+        if platform == "instagram" and mode == "hashtag" and not gallerydl_enabled:
+            raise RuntimeError("Instagram Hashtag 需要使用 gallery-dl；请取消设置 SMC_INSTAGRAM_LEGACY=1。")
+        if platform == "instagram" and not gallerydl_enabled:
             if self.browser_manager is None:
                 raise RuntimeError("Instagram 尚未登录，请先点击『打开浏览器 / 登录』，在 Chrome 中完成登录后再开始采集。")
             if self.browser_manager.is_login_running():
@@ -131,7 +131,7 @@ class DownloadEngine:
         if self.on_task_dir:
             self.on_task_dir(self.task_output_dir)
         collector = None
-        if platform == "instagram" and not gallerydl_poc:
+        if platform == "instagram" and not gallerydl_enabled:
             collector = InstagramCollector(self.profile_dir, self.on_log)
         elif platform == "x":
             collector = XCollector(self.profile_dir, self.on_log, self.task_output_dir)
@@ -140,7 +140,7 @@ class DownloadEngine:
         store: TaskStore | None = None
         try:
             self._emit("正在打开浏览器并收集图片")
-            if gallerydl_poc:
+            if gallerydl_enabled:
                 self._emit("正在使用 gallery-dl 发现 Instagram 素材")
             elif self.browser_manager and self.browser_manager.is_running() and self.browser_manager.endpoint:
                 collector.connect_over_cdp(self.browser_manager.endpoint)
@@ -156,7 +156,7 @@ class DownloadEngine:
             with httpx.Client(headers={"User-Agent": "Mozilla/5.0"}, follow_redirects=True, timeout=30) as client:
                 on_candidate = lambda candidate: self._process_candidate(client, candidate, store, known)
                 should_finish = lambda: self.stats.downloaded >= self.config.target_count
-                if gallerydl_poc:
+                if gallerydl_enabled:
                     def process_gallery_candidate(candidate: ImageCandidate) -> bool:
                         before = self.stats.downloaded
                         self._process_candidate(client, candidate, store, known)
@@ -228,7 +228,7 @@ class DownloadEngine:
                     if "media_type" in inspect.signature(collector.collect_current_page).parameters:
                         collect_args += (self.config.canonical_media_type(),)
                     candidates = collector.collect_current_page(*collect_args)
-            discovered_count = self.stats.discovered if gallerydl_poc else len(candidates)
+            discovered_count = self.stats.discovered if gallerydl_enabled else len(candidates)
             self.on_log(f"收集完成，发现 {discovered_count} 个候选资源。")
             self.on_log(
                 f"下载统计：成功保存 {self.stats.downloaded}/{self.config.target_count}，"

@@ -16,10 +16,10 @@ from src.adapters.instagram_gallerydl import (
     GalleryDlWorkerClient,
     InstagramGalleryDlAdapter,
     candidate_from_gallerydl,
-    gallerydl_poc_enabled,
+    instagram_legacy_enabled,
     resolve_gallerydl_python,
 )
-from src.adapters.instagram_cookie_bridge import load_instagram_cookies, save_instagram_cookies
+from src.adapters.instagram_cookie_bridge import InstagramAuthRequired, load_instagram_cookies, save_instagram_cookies
 from src.adapters import gallerydl_worker
 
 
@@ -107,10 +107,46 @@ def test_gallerydl_raw_dash_manifest_is_converted_to_existing_dash_source():
     assert source.audio_url.endswith("audio.m4a")
 
 
-def test_feature_flag_is_opt_in():
-    assert not gallerydl_poc_enabled({})
-    assert gallerydl_poc_enabled({"SMC_INSTAGRAM_GALLERYDL_POC": "1"})
-    assert gallerydl_poc_enabled({"SMC_INSTAGRAM_GALLERYDL_POC": "true"})
+def test_instagram_gallerydl_is_default_and_legacy_is_explicit():
+    assert not instagram_legacy_enabled({})
+    assert not instagram_legacy_enabled({"SMC_INSTAGRAM_GALLERYDL_POC": "1"})
+    assert instagram_legacy_enabled({"SMC_INSTAGRAM_LEGACY": "1"})
+    assert instagram_legacy_enabled({"SMC_INSTAGRAM_LEGACY": "true"})
+
+
+def test_adapter_user_log_uses_production_gallerydl_label():
+    fake = FakeClient([
+        {"type": "ready", "cookie_loaded": True},
+        {"type": "exhausted"},
+    ])
+    logs: list[str] = []
+    adapter = InstagramGalleryDlAdapter(
+        profile_path=Path("profile"),
+        client_factory=lambda *args, **kwargs: fake,
+        cookies={"sessionid": "fixture"},
+    )
+
+    assert adapter.collect(
+        "https://www.instagram.com/p/ABC123/",
+        on_candidate=lambda _candidate: True,
+        on_log=logs.append,
+    ) == 0
+    assert "Instagram engine=gallery-dl; cookie loaded=yes" in logs
+    assert all("poc" not in message.casefold() for message in logs)
+
+
+def test_gallerydl_default_keeps_cookie_auth_required_behavior(monkeypatch):
+    monkeypatch.setattr(
+        "src.adapters.instagram_gallerydl.load_instagram_cookies",
+        lambda: (_ for _ in ()).throw(InstagramAuthRequired("cookie missing")),
+    )
+    adapter = InstagramGalleryDlAdapter(profile_path=Path("profile"))
+
+    with pytest.raises(InstagramAuthRequired, match="cookie missing"):
+        adapter.collect(
+            "https://www.instagram.com/p/ABC123/",
+            on_candidate=lambda _candidate: True,
+        )
 
 
 def _fake_gallerydl_python(root: Path) -> Path:
