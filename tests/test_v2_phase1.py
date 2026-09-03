@@ -86,7 +86,7 @@ def test_platform_registry_declares_current_and_reserved_capabilities() -> None:
     instagram = get_platform_spec("instagram")
     assert instagram is not None
     assert instagram.enabled is True
-    assert instagram.collection_modes == ("author", "single_post")
+    assert instagram.collection_modes == ("author", "single_post", "hashtag")
 
     youtube = get_platform_spec("youtube")
     assert youtube is not None

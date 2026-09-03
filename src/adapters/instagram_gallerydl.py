@@ -15,6 +15,7 @@ from src.browser.instagram_collector import media_identity
 from src.downloader.dash import parse_mpd, select_best_audio, select_best_video
 from src.adapters.instagram_cookie_bridge import InstagramAuthRequired, load_instagram_cookies
 from src.utils.paths import profile_directory_for_platform
+from src.utils.instagram import normalize_hashtag
 from src.utils.runtime import subprocess_creation_flags
 
 
@@ -307,6 +308,8 @@ def candidate_from_gallerydl(payload: dict[str, Any]) -> ImageCandidate:
         thumbnail_url=str(payload.get("thumbnail_url") or display_url),
         metadata_source="gallery-dl",
         source="gallery-dl",
+        hashtag=str(payload.get("hashtag") or payload.get("source_hashtag") or ""),
+        source_hashtag=str(payload.get("source_hashtag") or payload.get("hashtag") or ""),
     )
 
 
@@ -334,6 +337,7 @@ class GalleryDlWorkerClient:
         worker_script: Path | None = None,
         popen_factory: Callable[..., Any] = subprocess.Popen,
         cookies: dict[str, str] | None = None,
+        source_hashtag: str = "",
     ) -> None:
         self.url = url
         self.profile_path = Path(profile_path)
@@ -354,6 +358,7 @@ class GalleryDlWorkerClient:
         )
         self.worker_script = Path(worker_script or Path(__file__).with_name("gallerydl_worker.py"))
         self.cookies = dict(cookies or {})
+        self.source_hashtag = source_hashtag
         self._popen_factory = popen_factory
         self._process: Any | None = None
         self._events: queue.Queue[dict[str, Any] | None] = queue.Queue()
@@ -410,6 +415,7 @@ class GalleryDlWorkerClient:
                 "media_type": self.media_type,
                 "gallery_dl_root": str(self.gallery_dl_root),
                 "cookies": self.cookies,
+                "source_hashtag": self.source_hashtag,
             }
         )
 
@@ -516,7 +522,7 @@ class GalleryDlWorkerClient:
 
 @dataclass
 class InstagramGalleryDlAdapter:
-    """Phase 1 adapter; the normal InstagramCollector remains the default."""
+    """Opt-in gallery-dl adapter; the normal InstagramCollector remains the default."""
 
     profile_path: Path | None = None
     python_executable: Path | None = None
@@ -528,7 +534,7 @@ class InstagramGalleryDlAdapter:
     def profile(self) -> Path:
         return Path(self.profile_path or profile_directory_for_platform("instagram"))
 
-    def create_client(self, url: str, media_type: str = "mixed") -> _WorkerClient:
+    def create_client(self, url: str, media_type: str = "mixed", source_hashtag: str = "") -> _WorkerClient:
         return self.client_factory(
             url,
             self.profile(),
@@ -537,6 +543,7 @@ class InstagramGalleryDlAdapter:
             gallery_dl_root=self.gallery_dl_root,
             worker_script=self.worker_script,
             cookies=self.cookies,
+            source_hashtag=source_hashtag,
         )
 
     def collect(
@@ -545,9 +552,12 @@ class InstagramGalleryDlAdapter:
         *,
         media_type: str = "mixed",
         author_username: str | None = None,
+        source_hashtag: str | None = None,
         stop_event: threading.Event | None = None,
         pause_event: threading.Event | None = None,
         on_candidate: Callable[[ImageCandidate], bool | None],
+        on_discovered: Callable[[ImageCandidate], None] | None = None,
+        on_skipped: Callable[[ImageCandidate], None] | None = None,
         on_log: Callable[[str], None] | None = None,
     ) -> int:
         """Stream candidates and let the SMC callback own final download/counting.
@@ -569,7 +579,8 @@ class InstagramGalleryDlAdapter:
             raise InstagramAuthRequired("Instagram cookie loaded=no; sessionid 未找到")
         requested_media_type = (media_type or "mixed").strip().lower()
         expected_username = (author_username or "").strip().lstrip("@").casefold()
-        client = self.create_client(url, "mixed")
+        normalized_hashtag = normalize_hashtag(source_hashtag or url) if source_hashtag or "/explore/tags/" in url.casefold() else ""
+        client = self.create_client(url, "mixed", normalized_hashtag)
         delivered = 0
         pause_sent = False
         try:
@@ -609,11 +620,17 @@ class InstagramGalleryDlAdapter:
                     raise GalleryDlError(f"unexpected gallery-dl event: {event_type}")
 
                 candidate = candidate_from_gallerydl(event)
+                if on_discovered:
+                    on_discovered(candidate)
                 if expected_username and candidate.author_username.casefold() != expected_username:
+                    if on_skipped:
+                        on_skipped(candidate)
                     if on_log:
                         on_log("Instagram candidate skipped: author ownership mismatch")
                     continue
                 if requested_media_type != "mixed" and candidate.media_type != requested_media_type:
+                    if on_skipped:
+                        on_skipped(candidate)
                     if on_log:
                         on_log(f"Instagram candidate skipped: media_type={candidate.media_type}")
                     continue

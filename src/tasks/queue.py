@@ -6,6 +6,7 @@ from uuid import uuid4
 
 from src.models import TASK_STATUSES, TaskConfig
 from src.utils.x import normalize_x_author
+from src.utils.instagram import normalize_hashtag
 
 
 class BatchInputError(ValueError):
@@ -58,8 +59,8 @@ def parse_batch_sources(platform: str, collection_mode: str, text: str) -> list[
     """Parse, trim, validate and de-duplicate one source per non-empty line."""
     platform = platform.strip().lower()
     collection_mode = collection_mode.strip().lower()
-    if (platform, collection_mode) not in {("pinterest", "search"), ("x", "author"), ("x", "search")}:
-        raise ValueError("批量任务目前支持 Pinterest 关键词搜索、X 关键词搜索和 X 作者主页")
+    if (platform, collection_mode) not in {("pinterest", "search"), ("x", "author"), ("x", "search"), ("instagram", "hashtag")}:
+        raise ValueError("批量任务目前支持 Pinterest 关键词搜索、X 关键词搜索、X 作者主页和 Instagram Hashtag")
 
     sources: list[str] = []
     seen: set[str] = set()
@@ -72,6 +73,8 @@ def parse_batch_sources(platform: str, collection_mode: str, text: str) -> list[
                 value = normalize_x_author(value)[0]
             elif platform == "x" and collection_mode == "search":
                 TaskConfig(value, 1, Path("."), platform="x", collection_mode="search").validate()
+            elif platform == "instagram" and collection_mode == "hashtag":
+                value = normalize_hashtag(value)
             else:
                 TaskConfig(value, 1, Path("."), platform="pinterest", collection_mode="search").validate()
         except ValueError as exc:
@@ -96,6 +99,7 @@ def build_batch_configs(base_config: TaskConfig, text: str) -> list[TaskConfig]:
                 status="pending",
                 keyword=source if platform == "pinterest" else "",
                 source_identifier=source if platform == "x" and mode in {"author", "search"} else "",
+                hashtag=source if platform == "instagram" and mode == "hashtag" else "",
                 # Keep the user's selected directory as the immutable save root.
                 # The engine creates the per-task output directory at runtime.
                 output_root=base_config.output_root,

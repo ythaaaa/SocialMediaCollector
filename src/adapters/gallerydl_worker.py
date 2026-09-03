@@ -1,4 +1,4 @@
-"""Isolated JSONL worker for the Instagram gallery-dl Phase 1 PoC."""
+"""Isolated JSONL worker for the opt-in Instagram gallery-dl adapter."""
 
 from __future__ import annotations
 
@@ -16,6 +16,10 @@ POST_URL_RE = re.compile(
 )
 AUTHOR_URL_RE = re.compile(
     r"^https?://(?:www\.)?instagram\.com/([A-Za-z0-9._]{1,30})/?(?:[?#].*)?$",
+    re.IGNORECASE,
+)
+TAG_URL_RE = re.compile(
+    r"^https?://(?:www\.)?instagram\.com/explore/tags/([^/?#]+)/?(?:[?#].*)?$",
     re.IGNORECASE,
 )
 
@@ -81,7 +85,7 @@ def _safe_int(value: Any) -> int | None:
         return None
 
 
-def _candidate_payload(post: dict[str, Any], file_data: dict[str, Any]) -> dict[str, Any]:
+def _candidate_payload(post: dict[str, Any], file_data: dict[str, Any], source_hashtag: str = "") -> dict[str, Any]:
     media_type = "video" if file_data.get("video_url") else "image"
     shortcode = str(post.get("post_shortcode") or file_data.get("shortcode") or "")
     try:
@@ -91,6 +95,7 @@ def _candidate_payload(post: dict[str, Any], file_data: dict[str, Any]) -> dict[
     display_url = str(file_data.get("display_url") or "")
     video_url = str(file_data.get("video_url") or "")
     dash_manifest = file_data.get("_ytdl_manifest_data")
+    hashtag = source_hashtag or str(post.get("tag") or "")
     metadata = {
         "platform": "instagram",
         "post_id": str(post.get("post_id") or ""),
@@ -98,12 +103,15 @@ def _candidate_payload(post: dict[str, Any], file_data: dict[str, Any]) -> dict[
         "post_url": str(post.get("post_url") or ""),
         "username": str(post.get("username") or ""),
         "description": str(post.get("description") or ""),
+        "caption": str(post.get("description") or ""),
         "date": _safe_date(post.get("post_date") or post.get("date")),
         "media_index": media_index,
         "media_type": media_type,
         "width": _safe_int(file_data.get("width")),
         "height": _safe_int(file_data.get("height")),
         "dash_manifest": dash_manifest,
+        "hashtag": hashtag,
+        "source_hashtag": hashtag,
     }
     return {
         "type": "candidate",
@@ -116,6 +124,7 @@ def _candidate_payload(post: dict[str, Any], file_data: dict[str, Any]) -> dict[
         "post_url": str(post.get("post_url") or ""),
         "username": str(post.get("username") or ""),
         "description": str(post.get("description") or ""),
+        "caption": str(post.get("description") or ""),
         "date": _safe_date(post.get("post_date") or post.get("date")),
         "display_url": display_url,
         "video_url": video_url,
@@ -124,11 +133,13 @@ def _candidate_payload(post: dict[str, Any], file_data: dict[str, Any]) -> dict[
         "height": _safe_int(file_data.get("height")),
         "thumbnail_url": display_url,
         "dash_manifest": dash_manifest,
+        "hashtag": hashtag,
+        "source_hashtag": hashtag,
         "metadata": metadata,
     }
 
 
-def _matching_items(items: Iterator[tuple[Any, str, dict[str, Any]]], media_type: str) -> Iterator[dict[str, Any]]:
+def _matching_items(items: Iterator[tuple[Any, str, dict[str, Any]]], media_type: str, source_hashtag: str = "") -> Iterator[dict[str, Any]]:
     post: dict[str, Any] = {}
     for kind, _url, file_data in items:
         if kind == 2:  # gallery_dl.extractor.message.Message.Directory
@@ -136,7 +147,7 @@ def _matching_items(items: Iterator[tuple[Any, str, dict[str, Any]]], media_type
             continue
         if kind != 3:  # gallery_dl.extractor.message.Message.Url
             continue
-        payload = _candidate_payload(post, file_data)
+        payload = _candidate_payload(post, file_data, source_hashtag)
         if media_type in {"mixed", payload["media_type"]}:
             yield payload
 
@@ -148,8 +159,9 @@ def run(start: dict[str, Any]) -> int:
     media_type = str(start.get("media_type") or "mixed").lower()
     is_post = bool(POST_URL_RE.match(url))
     is_author = bool(AUTHOR_URL_RE.match(url))
-    if not is_post and not is_author:
-        _write({"type": "error", "message": "only Instagram Author or Single Post/Reel URLs are supported"})
+    is_tag = bool(TAG_URL_RE.match(url))
+    if not is_post and not is_author and not is_tag:
+        _write({"type": "error", "message": "only Instagram Author, Hashtag, or Single Post/Reel URLs are supported"})
         return 2
     if media_type not in {"image", "video", "mixed"}:
         _write({"type": "error", "message": f"unsupported media_type: {media_type}"})
@@ -177,9 +189,9 @@ def run(start: dict[str, Any]) -> int:
         if is_author:
             extractor_url = url.rstrip("/") + "/posts/"
         instance = extractor.find(extractor_url)
-        expected_subcategories = {"post", "reel"} if is_post else {"posts"}
+        expected_subcategories = {"post", "reel"} if is_post else ({"posts"} if is_author else {"tag"})
         if instance is None or instance.category != "instagram" or instance.subcategory not in expected_subcategories:
-            mode = "Single Post/Reel" if is_post else "Author"
+            mode = "Single Post/Reel" if is_post else ("Author" if is_author else "Hashtag")
             _write({"type": "error", "message": f"gallery-dl did not resolve an Instagram {mode} extractor"})
             return 2
         instance.initialize()
@@ -210,7 +222,7 @@ def run(start: dict[str, Any]) -> int:
             return 2
         # SMC owns media-type filtering so skipped videos/images still advance
         # the same lazy iterator and do not affect target_count.
-        candidates = _matching_items(iter(instance.items()), "mixed")
+        candidates = _matching_items(iter(instance.items()), "mixed", str(start.get("source_hashtag") or ""))
     except Exception as exc:
         _write({"type": "error", "message": f"gallery-dl initialization failed: {type(exc).__name__}: {exc}"})
         return 1

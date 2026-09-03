@@ -45,6 +45,8 @@ class ImageCandidate:
     thumbnail_url: str = ""
     metadata_source: str = ""
     source: str = ""
+    hashtag: str = ""
+    source_hashtag: str = ""
 
 
 @dataclass(frozen=True)

@@ -13,6 +13,7 @@ MODE_LABELS = {
     "current_page": "当前页面",
     "author": "作者主页",
     "single_post": "单条链接",
+    "hashtag": "Hashtag / 标签",
     "channel": "频道",
     "single_video": "单条视频",
 }
@@ -64,7 +65,7 @@ PLATFORM_REGISTRY: dict[str, PlatformSpec] = {
         label="Instagram",
         icon="icons/platforms/instagram.svg",
         enabled=True,
-        collection_modes=("author", "single_post"),
+        collection_modes=("author", "single_post", "hashtag"),
         media_types=("image", "video", "mixed"),
         default_mode="author",
         default_media_type="mixed",

@@ -1,6 +1,7 @@
 from pathlib import Path
 from unittest.mock import Mock
 import hashlib
+from types import SimpleNamespace
 
 import httpx
 import pytest
@@ -148,6 +149,7 @@ def test_current_task_identity_duplicate_is_always_skipped(tmp_path: Path, monke
 
     assert downloaded == ["https://cdn.test/a.jpg"]
     assert engine.stats.duplicate_count == 1
+    assert engine.stats.skipped == 0
     database.find_duplicate.assert_not_called()
 
 
@@ -182,6 +184,7 @@ def test_history_identity_switch_controls_author_candidate(tmp_path: Path, monke
 
     assert downloaded == ([] if skip_history else ["POST:0"])
     assert engine.stats.duplicate_count == (1 if skip_history else 0)
+    assert engine.stats.skipped == 0
     if skip_history:
         database.find_duplicate.assert_called_once_with(candidate, "alice", require_local_file=False)
     else:
@@ -424,6 +427,114 @@ def test_gallerydl_author_keeps_requesting_after_duplicate_and_failed_until_targ
     assert '"downloaded": 3' in (task_dir / "task.json").read_text(encoding="utf-8")
 
 
+def test_gallerydl_discovered_counts_duplicates_failures_and_successes_before_processing(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("SMC_INSTAGRAM_GALLERYDL_POC", "1")
+    candidates = [
+        ImageCandidate("", "", platform="instagram", author_username="alice", shortcode="CURRENT_DUP", media_url="current", media_identity="CURRENT_DUP:0"),
+        ImageCandidate("", "", platform="instagram", author_username="alice", shortcode="HISTORY_DUP", media_url="history", media_identity="HISTORY_DUP:0"),
+        ImageCandidate("", "", platform="instagram", author_username="alice", shortcode="FAILED", media_url="failed", media_identity="FAILED:0"),
+        ImageCandidate("", "", platform="instagram", author_username="alice", shortcode="SUCCESS1", media_url="success1", media_identity="SUCCESS1:0"),
+        ImageCandidate("", "", platform="instagram", author_username="alice", shortcode="SUCCESS2", media_url="success2", media_identity="SUCCESS2:0"),
+        ImageCandidate("", "", platform="instagram", author_username="alice", shortcode="SUCCESS3", media_url="success3", media_identity="SUCCESS3:0"),
+    ]
+
+    class GalleryAdapter:
+        def collect(self, _url, *, on_candidate, on_discovered, **_kwargs):
+            delivered = 0
+            for candidate in candidates:
+                on_discovered(candidate)
+                delivered += 1
+                if not on_candidate(candidate):
+                    break
+            return delivered
+
+    monkeypatch.setattr(engine_module, "InstagramGalleryDlAdapter", GalleryAdapter)
+    logs: list[str] = []
+    config = TaskConfig(
+        "",
+        3,
+        tmp_path / "output",
+        platform="instagram",
+        collection_mode="author",
+        source_identifier="@alice",
+        media_type="mixed",
+        interval_seconds=0,
+    )
+    engine = DownloadEngine(
+        config,
+        tmp_path / "profile",
+        on_log=logs.append,
+        database=CollectorDatabase(tmp_path / "collector.db"),
+    )
+
+    def fake_process(_client, candidate, _store, _known):
+        if candidate.shortcode in {"CURRENT_DUP", "HISTORY_DUP"}:
+            engine.stats.duplicate_count += 1
+        elif candidate.shortcode == "FAILED":
+            engine.stats.failed += 1
+        else:
+            engine.stats.downloaded += 1
+
+    monkeypatch.setattr(engine, "_process_candidate", fake_process)
+    engine.run()
+
+    assert engine.stats.discovered == 6
+    assert engine.stats.duplicate_count == 2
+    assert engine.stats.failed == 1
+    assert engine.stats.downloaded == 3
+    assert "收集完成，发现 6 个候选资源。" in logs
+
+
+def test_gallerydl_video_filter_counts_twenty_images_as_skipped(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("SMC_INSTAGRAM_GALLERYDL_POC", "1")
+    candidates = [
+        ImageCandidate("", "", platform="instagram", media_type="image", media_url=f"image-{index}", media_identity=f"IMAGE:{index}")
+        for index in range(20)
+    ]
+    candidates.append(ImageCandidate("", "", platform="instagram", media_type="video", media_url="video", media_identity="VIDEO:0"))
+
+    class GalleryAdapter:
+        def collect(self, _url, *, on_candidate, on_discovered, on_skipped, **_kwargs):
+            delivered = 0
+            for candidate in candidates:
+                on_discovered(candidate)
+                if candidate.media_type != "video":
+                    on_skipped(candidate)
+                    continue
+                delivered += 1
+                if not on_candidate(candidate):
+                    break
+            return delivered
+
+    monkeypatch.setattr(engine_module, "InstagramGalleryDlAdapter", GalleryAdapter)
+    logs: list[str] = []
+    config = TaskConfig(
+        "",
+        1,
+        tmp_path / "output",
+        platform="instagram",
+        collection_mode="hashtag",
+        source_identifier="reels",
+        media_type="video",
+        interval_seconds=0,
+    )
+    engine = DownloadEngine(
+        config,
+        tmp_path / "profile",
+        on_log=logs.append,
+        database=CollectorDatabase(tmp_path / "collector.db"),
+    )
+    monkeypatch.setattr(engine, "_process_candidate", lambda *_args: setattr(engine.stats, "downloaded", 1))
+
+    engine.run()
+
+    assert engine.stats.discovered == 21
+    assert engine.stats.skipped == 20
+    assert engine.stats.downloaded == 1
+    assert engine.stats.failed == 0
+    assert "收集完成，发现 21 个候选资源。" in logs
+
+
 def test_gallerydl_author_exhausted_before_target_is_failed(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setenv("SMC_INSTAGRAM_GALLERYDL_POC", "1")
 
@@ -459,6 +570,78 @@ def test_gallerydl_author_exhausted_before_target_is_failed(tmp_path: Path, monk
     history = engine.database.get_history(config.task_id)
     assert history["status"] == "failed"
     assert history["error_message"] == "source exhausted before target reached"
+
+
+def test_gallerydl_hashtag_uses_tag_url_without_collection_chrome(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("SMC_INSTAGRAM_GALLERYDL_POC", "1")
+    observed: dict[str, object] = {}
+
+    class GalleryAdapter:
+        def collect(self, url, *, source_hashtag, on_candidate, **_kwargs):
+            observed["url"] = url
+            observed["source_hashtag"] = source_hashtag
+            on_candidate(ImageCandidate(
+                "",
+                "https://www.instagram.com/p/TAGPOST1/",
+                platform="instagram",
+                author_username="creator",
+                media_url="tag-media",
+                media_identity="TAGPOST1:0",
+                hashtag="aiart",
+                source_hashtag="aiart",
+            ))
+            return 1
+
+    monkeypatch.setattr(engine_module, "InstagramGalleryDlAdapter", GalleryAdapter)
+    config = TaskConfig(
+        "",
+        1,
+        tmp_path / "output",
+        platform="instagram",
+        collection_mode="hashtag",
+        source_identifier="#AIART",
+        media_type="image",
+        interval_seconds=0,
+    )
+    engine = DownloadEngine(config, tmp_path / "profile", database=CollectorDatabase(tmp_path / "collector.db"))
+    monkeypatch.setattr(engine, "_process_candidate", lambda *_args: setattr(engine.stats, "downloaded", 1))
+
+    task_dir = engine.run()
+
+    assert observed == {
+        "url": "https://www.instagram.com/explore/tags/aiart/",
+        "source_hashtag": "aiart",
+    }
+    task_data = (task_dir / "task.json").read_text(encoding="utf-8")
+    assert '"collection_mode": "hashtag"' in task_data
+    assert '"hashtag": "aiart"' in task_data
+    assert '"source_hashtag": "aiart"' in task_data
+
+
+def test_gallerydl_hashtag_exhausted_before_target_is_failed(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("SMC_INSTAGRAM_GALLERYDL_POC", "1")
+
+    class GalleryAdapter:
+        def collect(self, _url, *, on_candidate, **_kwargs):
+            on_candidate(ImageCandidate("", "", platform="instagram", media_url="only", media_identity="ONLY:0"))
+            return 1
+
+    monkeypatch.setattr(engine_module, "InstagramGalleryDlAdapter", GalleryAdapter)
+    config = TaskConfig(
+        "",
+        2,
+        tmp_path / "output",
+        platform="instagram",
+        collection_mode="hashtag",
+        source_identifier="travel",
+        media_type="image",
+        interval_seconds=0,
+    )
+    engine = DownloadEngine(config, tmp_path / "profile", database=CollectorDatabase(tmp_path / "collector.db"))
+    monkeypatch.setattr(engine, "_process_candidate", lambda *_args: setattr(engine.stats, "downloaded", 1))
+
+    with pytest.raises(GalleryDlError, match="source exhausted before target reached"):
+        engine.run()
 
 
 def test_engine_rejects_instagram_without_manual_login_browser(tmp_path: Path) -> None:
@@ -547,6 +730,48 @@ def test_video_download_error_only_fails_current_candidate(tmp_path: Path, monke
     assert calls == 2
     assert engine.stats.failed == 1
     assert engine.stats.downloaded == 1
+    assert engine.stats.skipped == 0
+
+
+def test_instagram_video_success_log_uses_instagram_stage_label(tmp_path: Path, monkeypatch) -> None:
+    config = TaskConfig(
+        "",
+        1,
+        tmp_path / "output",
+        platform="instagram",
+        collection_mode="single_post",
+        source_identifier="https://www.instagram.com/reel/ABC123/",
+        media_type="video",
+        interval_seconds=0,
+    )
+    logs: list[str] = []
+    engine = DownloadEngine(
+        config,
+        tmp_path / "profile",
+        on_log=logs.append,
+        database=CollectorDatabase(tmp_path / "collector.db"),
+    )
+    engine.task_dir = tmp_path / "task"
+    engine.task_dir.mkdir()
+    store = TaskStore(engine.task_dir, config)
+
+    def fake_download_direct(_client, _url, output_path, _source, _referer):
+        output_path.write_bytes(b"fixture-video")
+        return SimpleNamespace(duration=1.0, width=720, height=1280, bitrate=1000)
+
+    monkeypatch.setattr(engine, "_download_direct_video", fake_download_direct)
+    candidate = ImageCandidate(
+        "",
+        "https://www.instagram.com/reel/ABC123/",
+        platform="instagram",
+        media_type="video",
+        media_url="https://cdn.test/video.mp4",
+    )
+
+    engine._download_one(object(), candidate, store, set())
+
+    assert "Instagram视频阶段=mp4_saved" in logs
+    assert "Pinterest视频阶段=mp4_saved" not in logs
 
 
 def test_dash_cancellation_does_not_record_a_failed_candidate(tmp_path: Path, monkeypatch) -> None:

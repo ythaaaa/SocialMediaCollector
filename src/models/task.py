@@ -7,6 +7,7 @@ from uuid import uuid4
 
 from src.utils.x import normalize_x_author
 from src.platforms import get_platform_spec
+from src.utils.instagram import normalize_hashtag
 
 
 TASK_STATUSES = frozenset({"pending", "running", "paused", "completed", "failed", "stopped", "interrupted"})
@@ -53,6 +54,7 @@ class TaskConfig:
     collection_mode: str = ""
     platform: str = "pinterest"
     source_identifier: str = ""
+    hashtag: str = ""
     source_page_url: str = ""
     author_username: str = ""
     only_author_content: bool = True
@@ -86,12 +88,16 @@ class TaskConfig:
     @property
     def source_value(self) -> str:
         """Unified V2 source field while retaining legacy keyword/source fields."""
+        if self.canonical_collection_mode() == "hashtag":
+            return self.hashtag or self.source_identifier or self.keyword
         return self.source_identifier or self.author_username or self.keyword
 
     @property
     def canonical_source_value(self) -> str:
         if self.canonical_platform() == "x" and self.canonical_collection_mode() == "author":
             return self.canonical_author()[0]
+        if self.canonical_platform() == "instagram" and self.canonical_collection_mode() == "hashtag":
+            return normalize_hashtag(self.source_value)
         return self.source_value.strip()
 
     @property
@@ -128,6 +134,7 @@ class TaskConfig:
         platform = str(data.get("platform") or "pinterest")
         source_value = str(data.get("source_value") or "")
         collection_mode = str(data.get("collection_mode") or data.get("mode") or "search")
+        source_identifier = str(data.get("source_identifier") or data.get("source_value") or "")
         return cls(
             keyword=str(data.get("keyword") or (source_value if platform == "pinterest" else "")),
             target_count=int(data.get("target_count", 0)),
@@ -140,7 +147,8 @@ class TaskConfig:
             mode=str(data.get("mode") or "keyword_search"),
             collection_mode=collection_mode,
             platform=platform,
-            source_identifier=str(data.get("source_identifier") or data.get("source_value") or ""),
+            source_identifier=source_identifier,
+            hashtag=str(data.get("hashtag") or (source_identifier if collection_mode == "hashtag" else "")),
             source_page_url=str(data.get("source_page_url") or ""),
             author_username=str(data.get("author_username") or ""),
             only_author_content=bool(data.get("only_author_content", data.get("only_author_posts", True))),
@@ -227,6 +235,8 @@ class DownloadRecord:
     thumbnail_url: str = ""
     metadata_source: str = ""
     source: str = ""
+    hashtag: str = ""
+    source_hashtag: str = ""
 
     def row(self) -> dict[str, Any]:
         return asdict(self)

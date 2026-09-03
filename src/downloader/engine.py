@@ -20,6 +20,7 @@ from src.downloader.hls import HLSDownloadCancelled, HLSDownloadError, HLSDownlo
 from src.downloader.dash import DASHDownloadCancelled, DASHDownloadError, DASHDownloader
 from src.storage import CollectorDatabase, TaskStore
 from src.utils.paths import create_task_directory
+from src.utils.instagram import instagram_hashtag_url, normalize_hashtag
 from src.adapters.instagram_gallerydl import GalleryDlError, InstagramGalleryDlAdapter, gallerydl_poc_enabled
 
 
@@ -74,8 +75,11 @@ class DownloadEngine:
         self._current_task_hashes.clear()
         platform = self.config.canonical_platform()
         mode = self.config.canonical_collection_mode()
-        gallerydl_poc = platform == "instagram" and mode in {"single_post", "author"} and gallerydl_poc_enabled()
+        gallerydl_poc = platform == "instagram" and mode in {"single_post", "author", "hashtag"} and gallerydl_poc_enabled()
         gallerydl_author_username = ""
+        gallerydl_source_hashtag = ""
+        if platform == "instagram" and mode == "hashtag" and not gallerydl_poc:
+            raise RuntimeError("Instagram Hashtag 当前需要设置 SMC_INSTAGRAM_GALLERYDL_POC=1。")
         if platform == "instagram" and not gallerydl_poc:
             if self.browser_manager is None:
                 raise RuntimeError("Instagram 尚未登录，请先点击『打开浏览器 / 登录』，在 Chrome 中完成登录后再开始采集。")
@@ -85,7 +89,17 @@ class DownloadEngine:
                 self.browser_manager.open_collection_browser("https://www.instagram.com/")
         if mode == "current_page" and not (self.browser_manager and self.browser_manager.is_running()):
             raise RuntimeError("请先点击『打开浏览器 / 登录』，在 Pinterest 中打开需要采集的页面，然后开始下载。")
-        if platform == "instagram" and mode == "author":
+        if platform == "instagram" and mode == "hashtag":
+            hashtag = normalize_hashtag(self.config.canonical_source_value)
+            gallerydl_source_hashtag = hashtag
+            self.config = replace(
+                self.config,
+                source_identifier=hashtag,
+                hashtag=hashtag,
+                source_page_url=instagram_hashtag_url(hashtag),
+            )
+            task_name = f"instagram_hashtag_{hashtag}"
+        elif platform == "instagram" and mode == "author":
             from src.browser.instagram_collector import normalize_author
             username, _ = normalize_author(self.config.canonical_source_value)
             gallerydl_author_username = username
@@ -150,17 +164,28 @@ class DownloadEngine:
                             self.on_log("Instagram download success")
                         return not self.stop_event.is_set() and self.stats.downloaded < self.config.target_count
 
+                    def on_gallerydl_discovered(_candidate: ImageCandidate) -> None:
+                        self.stats.discovered += 1
+                        self._emit()
+
+                    def on_gallerydl_skipped(_candidate: ImageCandidate) -> None:
+                        self.stats.skipped += 1
+                        self._emit()
+
                     candidates = [None] * InstagramGalleryDlAdapter().collect(
-                        self.config.source_page_url if mode == "author" else self.config.canonical_source_value,
+                        self.config.source_page_url if mode in {"author", "hashtag"} else self.config.canonical_source_value,
                         media_type=self.config.canonical_media_type(),
                         author_username=gallerydl_author_username or None,
+                        source_hashtag=gallerydl_source_hashtag or None,
                         stop_event=self.stop_event,
                         pause_event=self.pause_event,
                         on_candidate=process_gallery_candidate,
+                        on_discovered=on_gallerydl_discovered,
+                        on_skipped=on_gallerydl_skipped,
                         on_log=self.on_log,
                     )
                     if (
-                        mode == "author"
+                        mode in {"author", "hashtag"}
                         and not self.stop_event.is_set()
                         and self.stats.downloaded < self.config.target_count
                     ):
@@ -203,7 +228,8 @@ class DownloadEngine:
                     if "media_type" in inspect.signature(collector.collect_current_page).parameters:
                         collect_args += (self.config.canonical_media_type(),)
                     candidates = collector.collect_current_page(*collect_args)
-            self.on_log(f"收集完成，发现 {len(candidates)} 个候选资源。")
+            discovered_count = self.stats.discovered if gallerydl_poc else len(candidates)
+            self.on_log(f"收集完成，发现 {discovered_count} 个候选资源。")
             self.on_log(
                 f"下载统计：成功保存 {self.stats.downloaded}/{self.config.target_count}，"
                 f"历史重复 {self.stats.duplicate_count}，下载失败 {self.stats.failed}，"
@@ -346,6 +372,8 @@ class DownloadEngine:
             thumbnail_url=candidate.thumbnail_url,
             metadata_source=candidate.metadata_source,
             source=candidate.source,
+            hashtag=candidate.hashtag or self.config.hashtag,
+            source_hashtag=candidate.source_hashtag or self.config.hashtag,
         )
         try:
             if candidate.media_type == "video":
@@ -523,7 +551,7 @@ class DownloadEngine:
             self.stats.downloaded += 1
             self.database.register_media(candidate, self.config.canonical_source_value, digest, final_path, self.config.task_id)
             self.on_log(f"已保存 {record.filename}（视频）")
-            self.on_log("Pinterest视频阶段=mp4_saved")
+            self.on_log(f"{stage_label}=mp4_saved")
         except (HLSDownloadCancelled, DASHDownloadCancelled):
             self.on_log(f"{stage_label}=failed_stage=stopped")
             raise

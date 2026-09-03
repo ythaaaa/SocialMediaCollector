@@ -75,6 +75,25 @@ def test_x_search_batch_inherits_scope_and_media_type() -> None:
     assert all(config.canonical_media_type() == "video" for config in configs)
 
 
+def test_instagram_hashtag_batch_normalizes_and_preserves_policy() -> None:
+    configs = build_batch_configs(
+        TaskConfig(
+            "",
+            3,
+            Path("downloads"),
+            platform="instagram",
+            collection_mode="hashtag",
+            media_type="mixed",
+            skip_history_duplicates=True,
+        ),
+        "#AIART\ntravel\n#aiart",
+    )
+
+    assert [config.hashtag for config in configs] == ["aiart", "travel"]
+    assert [config.canonical_source_value for config in configs] == ["aiart", "travel"]
+    assert all(config.skip_history_duplicates for config in configs)
+
+
 def test_queue_tasks_create_sibling_directories_under_one_save_root(tmp_path: Path) -> None:
     configs = build_batch_configs(
         TaskConfig("", 5, tmp_path, platform="pinterest", collection_mode="search", interval_seconds=0),

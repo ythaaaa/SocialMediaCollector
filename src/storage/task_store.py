@@ -17,7 +17,7 @@ class TaskStore:
         "only_author_content", "media_type", "media_url", "duration", "video_width",
         "video_height", "bitrate", "post_id", "post_text", "prompt_detected", "prompt",
         "posted_at", "collected_at", "shortcode", "caption", "media_index", "thumbnail_url",
-        "metadata_source", "source",
+        "metadata_source", "source", "hashtag", "source_hashtag",
     ]
 
     def __init__(self, task_dir: Path, config: TaskConfig) -> None:
@@ -41,6 +41,9 @@ class TaskStore:
         data["media_type"] = config.canonical_media_type()
         data["search_scope"] = config.canonical_search_scope()
         data["mode"] = data["collection_mode"]
+        if config.canonical_platform() == "instagram" and config.canonical_collection_mode() == "hashtag":
+            data["hashtag"] = config.canonical_source_value
+            data["source_hashtag"] = config.canonical_source_value
         if config.canonical_platform() == "x" and config.canonical_collection_mode() == "author":
             username, profile_url = config.canonical_author()
             data["author_username"] = username

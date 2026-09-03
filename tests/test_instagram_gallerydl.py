@@ -10,6 +10,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from src.browser import ImageCandidate
 from src.adapters.instagram_gallerydl import (
     GalleryDlError,
     GalleryDlWorkerClient,
@@ -49,6 +50,13 @@ def test_gallerydl_candidate_mapping_preserves_smc_identity_and_metadata_fields(
     assert candidate.post_url.endswith("ABC123/")
     assert candidate.caption == "caption"
     assert candidate.metadata_source == "gallery-dl"
+
+
+def test_gallerydl_hashtag_candidate_mapping_preserves_source_hashtag():
+    candidate = candidate_from_gallerydl(image_payload(hashtag="aiart", source_hashtag="aiart"))
+
+    assert candidate.hashtag == "aiart"
+    assert candidate.source_hashtag == "aiart"
 
 
 def test_gallerydl_video_mapping_preserves_dash_manifest_payload():
@@ -382,6 +390,82 @@ def test_author_adapter_pause_resume_keeps_candidate_position():
     assert fake.commands.index("pause") < fake.commands.index("resume") < fake.commands.index("next", 2)
 
 
+def test_hashtag_adapter_does_not_apply_author_ownership_and_filters_media_type():
+    fake = FakeClient([
+        {"type": "ready", "cookie_loaded": True},
+        image_payload(username="creator", media_type="video", video_url="https://cdn.example/video.mp4"),
+        image_payload(username="another_creator", shortcode="TAGNEXT"),
+        {"type": "exhausted"},
+    ])
+    adapter = InstagramGalleryDlAdapter(
+        profile_path=Path("profile"),
+        client_factory=lambda *args, **kwargs: fake,
+        cookies={"sessionid": "fixture"},
+    )
+    seen = []
+
+    assert adapter.collect(
+        "https://www.instagram.com/explore/tags/aiart/",
+        media_type="image",
+        source_hashtag="aiart",
+        on_candidate=lambda candidate: seen.append(candidate) or True,
+    ) == 1
+    assert [candidate.shortcode for candidate in seen] == ["TAGNEXT"]
+    assert fake.commands == ["start", "next", "next", "next"]
+
+
+def test_adapter_reports_each_mapped_candidate_before_ownership_or_media_filter():
+    fake = FakeClient([
+        {"type": "ready", "cookie_loaded": True},
+        image_payload(shortcode="WRONG_OWNER", username="bob"),
+        image_payload(shortcode="FILTERED_VIDEO", media_type="video", video_url="https://cdn.example/video.mp4"),
+        image_payload(shortcode="ACCEPTED", username="alice"),
+        {"type": "exhausted"},
+    ])
+    adapter = InstagramGalleryDlAdapter(
+        profile_path=Path("profile"),
+        client_factory=lambda *args, **kwargs: fake,
+        cookies={"sessionid": "fixture"},
+    )
+    discovered: list[str] = []
+    skipped: list[str] = []
+    accepted: list[str] = []
+
+    assert adapter.collect(
+        "https://www.instagram.com/alice/",
+        media_type="image",
+        author_username="alice",
+        on_discovered=lambda candidate: discovered.append(candidate.shortcode),
+        on_skipped=lambda candidate: skipped.append(candidate.shortcode),
+        on_candidate=lambda candidate: accepted.append(candidate.shortcode) or True,
+    ) == 1
+    assert discovered == ["WRONG_OWNER", "FILTERED_VIDEO", "ACCEPTED"]
+    assert skipped == ["WRONG_OWNER", "FILTERED_VIDEO"]
+    assert accepted == ["ACCEPTED"]
+
+
+def test_adapter_control_and_error_messages_do_not_report_discovered():
+    for event in ({"type": "exhausted"}, {"type": "error", "message": "fixture error"}):
+        fake = FakeClient([{"type": "ready", "cookie_loaded": True}, event])
+        adapter = InstagramGalleryDlAdapter(
+            profile_path=Path("profile"),
+            client_factory=lambda *args, _fake=fake, **kwargs: _fake,
+            cookies={"sessionid": "fixture"},
+        )
+        discovered: list[ImageCandidate] = []
+        collect = lambda: adapter.collect(
+            "https://www.instagram.com/p/ABC123/",
+            on_discovered=discovered.append,
+            on_candidate=lambda _candidate: True,
+        )
+        if event["type"] == "error":
+            with pytest.raises(GalleryDlError, match="fixture error"):
+                collect()
+        else:
+            assert collect() == 0
+        assert discovered == []
+
+
 def test_worker_author_uses_posts_extractor_and_streams_candidate(monkeypatch, tmp_path: Path, capsys):
     profile = tmp_path / "profile"
     profile.mkdir()
@@ -443,6 +527,66 @@ def test_worker_author_uses_posts_extractor_and_streams_candidate(monkeypatch, t
     assert output[1]["type"] == "candidate"
     assert output[1]["media_identity"] == "AUTHOR1:0"
     assert output[1]["description"] == unicode_text
+
+
+def test_worker_hashtag_uses_official_tag_extractor_and_keeps_source_metadata(monkeypatch, tmp_path: Path, capsys):
+    profile = tmp_path / "profile"
+    profile.mkdir()
+    find_urls = []
+
+    class Instance:
+        category = "instagram"
+        subcategory = "tag"
+        cookies_names = ("sessionid",)
+        cookies_domain = ".instagram.com"
+
+        def initialize(self):
+            return None
+
+        def cookies_check(self, *_args):
+            return True
+
+        def request(self, *_args, **_kwargs):
+            return SimpleNamespace(url="https://www.instagram.com/", status_code=200)
+
+        def items(self):
+            return iter([
+                (2, "", {
+                    "post_id": "post-tag",
+                    "post_shortcode": "TAGPOST1",
+                    "post_url": "https://www.instagram.com/p/TAGPOST1/",
+                    "username": "creator",
+                    "description": "旅行 😂",
+                }),
+                (3, "https://cdn.example/tag.jpg", {
+                    "num": 1,
+                    "shortcode": "TAGPOST1",
+                    "display_url": "https://cdn.example/tag.jpg",
+                }),
+            ])
+
+    instance = Instance()
+    fake_gallery_dl = SimpleNamespace(
+        config=SimpleNamespace(set=lambda *_args, **_kwargs: None),
+        extractor=SimpleNamespace(find=lambda url: find_urls.append(url) or instance),
+    )
+    monkeypatch.setitem(sys.modules, "gallery_dl", fake_gallery_dl)
+    monkeypatch.setattr(gallerydl_worker.sys, "stdin", io.StringIO('{"type":"next"}\n{"type":"stop"}\n'))
+
+    assert gallerydl_worker.run({
+        "url": "https://www.instagram.com/explore/tags/aiart/",
+        "source_hashtag": "aiart",
+        "profile_path": str(profile),
+        "cookies": {"sessionid": "fixture"},
+        "media_type": "mixed",
+        "gallery_dl_root": str(tmp_path),
+    }) == 0
+
+    output = [json.loads(line) for line in capsys.readouterr().out.splitlines()]
+    assert find_urls == ["https://www.instagram.com/explore/tags/aiart/"]
+    assert output[1]["hashtag"] == "aiart"
+    assert output[1]["source_hashtag"] == "aiart"
+    assert output[1]["description"] == "旅行 😂"
 
 
 def test_cookie_store_is_dpapi_protected_and_round_trips(tmp_path: Path):

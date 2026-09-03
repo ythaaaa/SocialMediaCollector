@@ -120,6 +120,15 @@ def test_history_dedup_checkbox_is_in_advanced_settings_and_defaults_unchecked(w
     assert window._task_config_from_form().skip_history_duplicates is True
 
 
+def test_update_stats_displays_discovered_independently_of_download_result(window: MainWindow) -> None:
+    window.update_stats(TaskStats(discovered=21, downloaded=1, skipped=20, duplicate_count=0, failed=0))
+
+    assert window.found_block.value.text() == "21"
+    assert window.success_block.value.text() == "1"
+    assert window.skipped_block.value.text() == "20"
+    assert window.fail_block.value.text() == "0"
+
+
 def test_instagram_form_exposes_author_and_single_post_without_x_controls(window: MainWindow) -> None:
     window.platform.setCurrentIndex(2)
     assert window.platform.currentData() == "instagram"
@@ -164,11 +173,26 @@ def test_platform_combo_uses_registry_icons_and_disables_youtube(window: MainWin
 
     window.platform.setCurrentIndex(2)
     assert window.platform.currentData() == "instagram"
-    assert [window.mode.itemData(i) for i in range(window.mode.count())] == ["author", "single_post"]
+    assert [window.mode.itemData(i) for i in range(window.mode.count())] == ["author", "single_post", "hashtag"]
     assert [window.media_type.itemData(i) for i in range(window.media_type.count())] == ["image", "video", "mixed"]
     assert window.start.isEnabled()
     assert window.media_type.currentData() == "mixed"
     assert "Instagram" in window.mode_hint.text()
+
+
+def test_instagram_hashtag_form_normalizes_input_and_exposes_distinct_mode(window: MainWindow) -> None:
+    window.platform.setCurrentIndex(2)
+    window.mode.setCurrentIndex(2)
+    assert window.source_label.text() == "Hashtag / 标签"
+    assert window.keyword.placeholderText() == "例如：aiart 或 #aiart"
+    window.keyword.setText("#AiArt")
+
+    config = window._task_config_from_form()
+
+    assert config.collection_mode == "hashtag"
+    assert config.hashtag == "aiart"
+    assert config.source_identifier == "aiart"
+    assert config.canonical_source_value == "aiart"
 
 
 def test_reserved_platform_cannot_start_task(window: MainWindow, monkeypatch: pytest.MonkeyPatch) -> None:

@@ -1,7 +1,10 @@
 from pathlib import Path
 
+import pytest
+
 from src.utils.paths import create_task_directory, safe_folder_name
 from src.models import TaskConfig
+from src.utils.instagram import instagram_hashtag_url, normalize_hashtag
 
 
 def test_safe_folder_name_preserves_chinese_and_removes_windows_invalid_chars() -> None:
@@ -30,6 +33,19 @@ def test_history_dedup_config_round_trips_and_defaults_false() -> None:
     })
     assert config.skip_history_duplicates is True
     assert TaskConfig.from_dict({"keyword": "old", "target_count": 1, "output_root": "out", "skip_history_duplicates": "false"}).skip_history_duplicates is False
+
+
+def test_instagram_hashtag_normalization_accepts_plain_hash_and_tag_url() -> None:
+    assert normalize_hashtag("#aiart") == "aiart"
+    assert normalize_hashtag(" aiart ") == "aiart"
+    assert normalize_hashtag("https://www.instagram.com/explore/tags/%E6%97%85%E8%A1%8C/") == "旅行"
+    assert instagram_hashtag_url("#AIART") == "https://www.instagram.com/explore/tags/aiart/"
+
+
+def test_instagram_hashtag_normalization_rejects_empty_or_invalid_input() -> None:
+    for value in ("", "#", "ai art", "https://www.instagram.com/p/ABC123/"):
+        with pytest.raises(ValueError):
+            normalize_hashtag(value)
 
 
 def test_consecutive_task_directories_are_siblings_under_save_root(tmp_path: Path) -> None:

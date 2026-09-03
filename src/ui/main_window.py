@@ -33,6 +33,7 @@ from src.tasks import BatchInputError, QueueTask, build_batch_configs, remove_qu
 from src.ui.input_state import ModeInputState
 from src.ui.resources import app_icon_path, resource_path, set_windows_app_user_model_id, stylesheet
 from src.utils.paths import application_data_directory, browser_profile_directory, profile_directory_for_platform
+from src.utils.instagram import normalize_hashtag
 from src.version import APP_VERSION
 
 
@@ -803,16 +804,23 @@ class MainWindow(QMainWindow):
         self._set_platform_controls_enabled(True)
         if platform == "instagram":
             author_mode = mode == "author"
-            self.source_label.setText("作者用户名 / 主页地址" if author_mode else "Instagram 帖子 / Reel 链接")
+            hashtag_mode = mode == "hashtag"
+            self.source_label.setText(
+                "作者用户名 / 主页地址" if author_mode
+                else "Hashtag / 标签" if hashtag_mode
+                else "Instagram 帖子 / Reel 链接"
+            )
             self.source_label.setVisible(True)
             self.keyword.setVisible(True)
             self.keyword.setEnabled(True)
             self.keyword.setPlaceholderText(
                 "username、@username 或 Instagram 作者主页地址" if author_mode
+                else "例如：aiart 或 #aiart" if hashtag_mode
                 else "https://www.instagram.com/p/.../ 或 /reel/.../"
             )
             self.mode_hint.setText(
                 "从 Instagram 作者主页发现帖子和 Reels。" if author_mode
+                else "从 Instagram Hashtag 标签页发现帖子和 Reels。" if hashtag_mode
                 else "只处理指定的 Instagram 图片帖、轮播帖或 Reel。"
             )
             self.only_author.setVisible(False)
@@ -902,6 +910,7 @@ class MainWindow(QMainWindow):
             ("pinterest", "search"),
             ("x", "author"),
             ("x", "search"),
+            ("instagram", "hashtag"),
         })
 
     def _has_disabled_pending_platform(self) -> bool:
@@ -966,6 +975,7 @@ class MainWindow(QMainWindow):
         mode = str(self.mode.currentData())
         source_text = self.keyword.text()
         is_search = mode == "search"
+        hashtag = normalize_hashtag(source_text) if platform == "instagram" and mode == "hashtag" else ""
         return TaskConfig(
             keyword=source_text if is_search and platform == "pinterest" else "",
             target_count=self.count.value(),
@@ -975,7 +985,8 @@ class MainWindow(QMainWindow):
             interval_seconds=self.interval.value(),
             collection_mode=mode,
             platform=platform,
-            source_identifier=source_text if platform in {"x", "instagram"} and mode in {"author", "search", "single_post"} else "",
+            source_identifier=hashtag if hashtag else source_text if platform in {"x", "instagram"} and mode in {"author", "search", "single_post"} else "",
+            hashtag=hashtag,
             only_author_content=self.only_author.isChecked() if platform == "x" and mode == "author" else False,
             media_type=str(self.media_type.currentData()),
             search_scope=str(self.search_scope.currentData()) if platform == "x" and mode == "search" else "media",
