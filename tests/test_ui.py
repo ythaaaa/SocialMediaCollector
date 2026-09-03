@@ -111,6 +111,15 @@ def test_x_search_scope_still_writes_task_config(window: MainWindow) -> None:
     assert config.canonical_search_scope() == "top"
 
 
+def test_history_dedup_checkbox_is_in_advanced_settings_and_defaults_unchecked(window: MainWindow) -> None:
+    assert window.skip_history_duplicates.text() == "跳过历史已下载素材"
+    assert window.skip_history_duplicates.isChecked() is False
+    assert window.skip_history_duplicates.parentWidget() is window.advanced_panel
+
+    window.skip_history_duplicates.setChecked(True)
+    assert window._task_config_from_form().skip_history_duplicates is True
+
+
 def test_instagram_form_exposes_author_and_single_post_without_x_controls(window: MainWindow) -> None:
     window.platform.setCurrentIndex(2)
     assert window.platform.currentData() == "instagram"

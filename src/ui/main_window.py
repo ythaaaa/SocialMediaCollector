@@ -302,6 +302,9 @@ class MainWindow(QMainWindow):
         self.only_author.setChecked(True)
         self.only_prompt = QCheckBox("仅采集疑似包含 Prompt 的帖子")
         self.only_prompt.setChecked(False)
+        self.skip_history_duplicates = QCheckBox("跳过历史已下载素材")
+        self.skip_history_duplicates.setChecked(False)
+        self.skip_history_duplicates.setToolTip("勾选后使用历史数据库和历史 SHA-256 记录去重；默认允许重新下载。")
 
         self.count = self._spin_box(1, 10000, 100)
         self.min_width = self._spin_box(1, 10000, 800)
@@ -570,6 +573,7 @@ class MainWindow(QMainWindow):
         advanced_layout.addWidget(self._parameter_field("最低宽度", self.min_width), 0, 0)
         advanced_layout.addWidget(self._parameter_field("最低高度", self.min_height), 0, 1)
         advanced_layout.addWidget(self._parameter_field("下载间隔", self.interval), 0, 2)
+        advanced_layout.addWidget(self.skip_history_duplicates, 1, 0, 1, 3)
         for column in range(3):
             advanced_layout.setColumnStretch(column, 1)
         layout.addWidget(self.advanced_panel)
@@ -976,6 +980,7 @@ class MainWindow(QMainWindow):
             media_type=str(self.media_type.currentData()),
             search_scope=str(self.search_scope.currentData()) if platform == "x" and mode == "search" else "media",
             only_prompt_posts=self.only_prompt.isChecked() if platform == "x" else False,
+            skip_history_duplicates=self.skip_history_duplicates.isChecked(),
         )
 
     def _save_root(self) -> Path:
@@ -1417,6 +1422,7 @@ class MainWindow(QMainWindow):
         self.media_type.setEnabled(not running)
         self.batch_mode.setEnabled(not running)
         self.only_prompt.setEnabled(not running)
+        self.skip_history_duplicates.setEnabled(not running)
         self.start_queue.setEnabled(not running)
         self.clear_completed.setEnabled(not running)
         self.refresh_history.setEnabled(not running)

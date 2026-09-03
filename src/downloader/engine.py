@@ -20,7 +20,7 @@ from src.downloader.hls import HLSDownloadCancelled, HLSDownloadError, HLSDownlo
 from src.downloader.dash import DASHDownloadCancelled, DASHDownloadError, DASHDownloader
 from src.storage import CollectorDatabase, TaskStore
 from src.utils.paths import create_task_directory
-from src.adapters.instagram_gallerydl import InstagramGalleryDlAdapter, gallerydl_poc_enabled
+from src.adapters.instagram_gallerydl import GalleryDlError, InstagramGalleryDlAdapter, gallerydl_poc_enabled
 
 
 class DownloadEngine:
@@ -45,6 +45,8 @@ class DownloadEngine:
         self.stats = TaskStats()
         self.task_dir: Path | None = None
         self.task_output_dir: Path | None = None
+        self._current_task_candidate_keys: set[tuple[str, str]] = set()
+        self._current_task_hashes: set[str] = set()
 
     def pause(self) -> None:
         self.pause_event.clear()
@@ -68,9 +70,12 @@ class DownloadEngine:
         self.on_stats(self.stats)
 
     def run(self) -> Path:
+        self._current_task_candidate_keys.clear()
+        self._current_task_hashes.clear()
         platform = self.config.canonical_platform()
         mode = self.config.canonical_collection_mode()
-        gallerydl_poc = platform == "instagram" and mode == "single_post" and gallerydl_poc_enabled()
+        gallerydl_poc = platform == "instagram" and mode in {"single_post", "author"} and gallerydl_poc_enabled()
+        gallerydl_author_username = ""
         if platform == "instagram" and not gallerydl_poc:
             if self.browser_manager is None:
                 raise RuntimeError("Instagram 尚未登录，请先点击『打开浏览器 / 登录』，在 Chrome 中完成登录后再开始采集。")
@@ -83,6 +88,7 @@ class DownloadEngine:
         if platform == "instagram" and mode == "author":
             from src.browser.instagram_collector import normalize_author
             username, _ = normalize_author(self.config.canonical_source_value)
+            gallerydl_author_username = username
             self.config = replace(self.config, source_identifier=username, source_page_url=f"https://www.instagram.com/{username}/")
             task_name = f"instagram_{username}"
         elif platform == "instagram" and mode == "single_post":
@@ -132,6 +138,7 @@ class DownloadEngine:
             self.database.start_task(self.config, self.task_output_dir)
             store = TaskStore(self.task_output_dir, self.config)
             known = store.known_hashes()
+            self._current_task_hashes.update(known)
             with httpx.Client(headers={"User-Agent": "Mozilla/5.0"}, follow_redirects=True, timeout=30) as client:
                 on_candidate = lambda candidate: self._process_candidate(client, candidate, store, known)
                 should_finish = lambda: self.stats.downloaded >= self.config.target_count
@@ -144,13 +151,20 @@ class DownloadEngine:
                         return not self.stop_event.is_set() and self.stats.downloaded < self.config.target_count
 
                     candidates = [None] * InstagramGalleryDlAdapter().collect(
-                        self.config.canonical_source_value,
+                        self.config.source_page_url if mode == "author" else self.config.canonical_source_value,
                         media_type=self.config.canonical_media_type(),
+                        author_username=gallerydl_author_username or None,
                         stop_event=self.stop_event,
                         pause_event=self.pause_event,
                         on_candidate=process_gallery_candidate,
                         on_log=self.on_log,
                     )
+                    if (
+                        mode == "author"
+                        and not self.stop_event.is_set()
+                        and self.stats.downloaded < self.config.target_count
+                    ):
+                        raise GalleryDlError("source exhausted before target reached")
                 elif platform == "instagram" and mode == "author":
                     candidates = collector.collect_author(self.config.canonical_source_value, self.config.target_count, self.config.max_scrolls, self.stop_event.is_set, self._wait_if_paused, self._on_found, on_candidate, should_finish, self.config.canonical_media_type())
                 elif platform == "instagram" and mode == "single_post":
@@ -226,11 +240,21 @@ class DownloadEngine:
         self._wait_if_paused()
         if self.stop_event.is_set():
             return
-        duplicate = self.database.find_duplicate(candidate, self.config.canonical_source_value)
+        current_keys = self._current_candidate_keys(candidate)
+        if current_keys and any(key in self._current_task_candidate_keys for key in current_keys):
+            self._record_duplicate("已跳过当前任务重复素材")
+            self._emit()
+            return
+        self._current_task_candidate_keys.update(current_keys)
+        duplicate = None
+        if self.config.skip_history_duplicates:
+            duplicate = self.database.find_duplicate(
+                candidate,
+                self.config.canonical_source_value,
+                require_local_file=False,
+            )
         if duplicate:
-            self.stats.duplicate_count += 1
-            if self.stats.duplicate_count == 1 or self.stats.duplicate_count % 10 == 0:
-                self.on_log(f"已跳过历史重复素材：{self.stats.duplicate_count} 个")
+            self._record_duplicate("已跳过历史重复素材")
             self._emit()
             return
         self._emit("正在下载视频" if candidate.media_type == "video" else "正在下载图片")
@@ -240,14 +264,42 @@ class DownloadEngine:
 
     def _should_skip_discovered_candidate(self, candidate: ImageCandidate) -> bool:
         """Apply the existing Phase 4 identity check before Media detail-page work."""
-        duplicate = self.database.find_duplicate(candidate, self.config.canonical_source_value)
+        if not self.config.skip_history_duplicates:
+            return False
+        duplicate = self.database.find_duplicate(
+            candidate,
+            self.config.canonical_source_value,
+            require_local_file=False,
+        )
         if not duplicate:
             return False
-        self.stats.duplicate_count += 1
-        if self.stats.duplicate_count == 1 or self.stats.duplicate_count % 10 == 0:
-            self.on_log(f"已跳过历史重复素材：{self.stats.duplicate_count} 个")
+        self._record_duplicate("已跳过历史重复素材")
         self._emit()
         return True
+
+    def _record_duplicate(self, message: str) -> None:
+        self.stats.duplicate_count += 1
+        if self.stats.duplicate_count == 1 or self.stats.duplicate_count % 10 == 0:
+            self.on_log(f"{message}：{self.stats.duplicate_count} 个")
+
+    def _current_candidate_keys(self, candidate: ImageCandidate) -> set[tuple[str, str]]:
+        platform = self.config.canonical_platform()
+        keys: set[tuple[str, str]] = set()
+        identity = str(getattr(candidate, "media_identity", "") or "")
+        if identity:
+            keys.add(("identity", f"{platform}|{identity}"))
+        urls = [
+            str(getattr(candidate, "media_url", "") or ""),
+            str(getattr(candidate, "image_url", "") or ""),
+            *(str(url or "") for url in getattr(candidate, "fallback_urls", ()) or ()),
+        ]
+        for url in urls:
+            if not url:
+                continue
+            parsed = urlsplit(url)
+            normalized = urlunsplit((parsed.scheme, parsed.netloc, parsed.path, "", ""))
+            keys.add(("url", f"{platform}|{normalized}"))
+        return keys
 
     def _sleep_interval(self) -> None:
         self._sleep_controlled(self.config.interval_seconds)
@@ -325,7 +377,11 @@ class DownloadEngine:
             record.image_url = media_url
             record.media_url = media_url
             digest = hashlib.sha256(content).hexdigest()
-            if digest in known or self.database.find_hash_duplicate(digest):
+            historical_duplicate = (
+                self.config.skip_history_duplicates
+                and self.database.find_hash_duplicate(digest, require_local_file=False) is not None
+            )
+            if digest in known or digest in self._current_task_hashes or historical_duplicate:
                 self.stats.duplicate_count += 1
                 record.status, record.reason, record.content_hash = "skipped", "内容重复", digest
                 store.append(record)
@@ -344,7 +400,7 @@ class DownloadEngine:
             (self.task_dir / "images" / filename).write_bytes(content)
             record.filename, record.width, record.height, record.file_size = filename, width, height, len(content)
             record.image_format, record.downloaded_at, record.content_hash, record.status = fmt, datetime.now().isoformat(timespec="seconds"), digest, "downloaded"
-            store.append(record); known.add(digest); self.stats.downloaded += 1
+            store.append(record); known.add(digest); self._current_task_hashes.add(digest); self.stats.downloaded += 1
             self.database.register_media(candidate, self.config.canonical_source_value, digest, self.task_dir / "images" / filename, self.config.task_id)
             self.on_log(f"已保存 {filename}（{width}×{height}）")
         except (HLSDownloadCancelled, DASHDownloadCancelled):
@@ -429,7 +485,15 @@ class DownloadEngine:
             if self.stop_event.is_set():
                 raise HLSDownloadCancelled()
             digest = self._file_hash(part_path)
-            if digest in known or self.database.find_hash_duplicate(digest, part_path):
+            historical_duplicate = (
+                self.config.skip_history_duplicates
+                and self.database.find_hash_duplicate(
+                    digest,
+                    part_path,
+                    require_local_file=False,
+                ) is not None
+            )
+            if digest in known or digest in self._current_task_hashes or historical_duplicate:
                 self.stats.duplicate_count += 1
                 record.status, record.reason, record.content_hash = "skipped", "内容重复", digest
                 store.append(record)
@@ -455,6 +519,7 @@ class DownloadEngine:
             record.bitrate = result.bitrate or selected_source.bitrate
             store.append(record)
             known.add(digest)
+            self._current_task_hashes.add(digest)
             self.stats.downloaded += 1
             self.database.register_media(candidate, self.config.canonical_source_value, digest, final_path, self.config.task_id)
             self.on_log(f"已保存 {record.filename}（视频）")

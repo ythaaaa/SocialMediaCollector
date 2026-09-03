@@ -28,6 +28,14 @@ def _looks_like_url(value: str) -> bool:
     )
 
 
+def _as_bool(value: Any, default: bool = False) -> bool:
+    if value is None:
+        return default
+    if isinstance(value, str):
+        return value.strip().casefold() in {"1", "true", "yes", "on"}
+    return bool(value)
+
+
 @dataclass(frozen=True)
 class TaskConfig:
     keyword: str
@@ -51,6 +59,7 @@ class TaskConfig:
     media_type: str = "image"
     search_scope: str = "media"
     only_prompt_posts: bool = False
+    skip_history_duplicates: bool = False
     # V2 queue fields. Legacy fields above remain the source of truth for V1.
     task_id: str = field(default_factory=lambda: uuid4().hex)
     status: str = "pending"
@@ -138,6 +147,7 @@ class TaskConfig:
             media_type=str(data.get("media_type") or "image"),
             search_scope=str(data.get("search_scope") or "media"),
             only_prompt_posts=bool(data.get("only_prompt_posts", False)),
+            skip_history_duplicates=_as_bool(data.get("skip_history_duplicates"), False),
             task_id=str(data.get("task_id") or uuid4().hex),
             status=str(data.get("status") or "pending"),
         )

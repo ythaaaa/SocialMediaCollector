@@ -14,15 +14,51 @@ POST_URL_RE = re.compile(
     r"^https?://(?:www\.)?instagram\.com/(?:p|reel|reels)/[^/?#]+/?(?:[?#].*)?$",
     re.IGNORECASE,
 )
+AUTHOR_URL_RE = re.compile(
+    r"^https?://(?:www\.)?instagram\.com/([A-Za-z0-9._]{1,30})/?(?:[?#].*)?$",
+    re.IGNORECASE,
+)
+
+
+def _configure_stdio_utf8() -> None:
+    """Configure text streams when supported by Python/PyInstaller."""
+    for stream in (sys.stdin, sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if not callable(reconfigure):
+            continue
+        try:
+            reconfigure(encoding="utf-8", errors="strict")
+        except (OSError, ValueError):
+            continue
+
+
+def _readline_utf8(stream: Any) -> str:
+    """Read one UTF-8 protocol line, with a text-stream test fallback."""
+    buffer = getattr(stream, "buffer", None)
+    if buffer is not None:
+        raw = buffer.readline()
+        if not raw:
+            return ""
+        return raw.decode("utf-8")
+    return stream.readline()
 
 
 def _write(message: dict[str, Any]) -> None:
-    sys.stdout.write(json.dumps(message, ensure_ascii=False, default=str) + "\n")
+    line = json.dumps(message, ensure_ascii=False, default=str) + "\n"
+    buffer = getattr(sys.stdout, "buffer", None)
+    if buffer is not None:
+        buffer.write(line.encode("utf-8"))
+        buffer.flush()
+        return
+    sys.stdout.write(line)
     sys.stdout.flush()
 
 
 def _read_command() -> str | None:
-    line = sys.stdin.readline()
+    try:
+        line = _readline_utf8(sys.stdin)
+    except UnicodeError:
+        return "invalid"
     if not line:
         return None
     try:
@@ -47,7 +83,7 @@ def _safe_int(value: Any) -> int | None:
 
 def _candidate_payload(post: dict[str, Any], file_data: dict[str, Any]) -> dict[str, Any]:
     media_type = "video" if file_data.get("video_url") else "image"
-    shortcode = str(file_data.get("shortcode") or post.get("post_shortcode") or "")
+    shortcode = str(post.get("post_shortcode") or file_data.get("shortcode") or "")
     try:
         media_index = max(0, int(file_data.get("num", 1)) - 1)
     except (TypeError, ValueError):
@@ -110,8 +146,10 @@ def run(start: dict[str, Any]) -> int:
     profile_path = Path(str(start.get("profile_path") or ""))
     cookies = start.get("cookies")
     media_type = str(start.get("media_type") or "mixed").lower()
-    if not POST_URL_RE.match(url):
-        _write({"type": "error", "message": "only Instagram Single Post/Reel URLs are supported"})
+    is_post = bool(POST_URL_RE.match(url))
+    is_author = bool(AUTHOR_URL_RE.match(url))
+    if not is_post and not is_author:
+        _write({"type": "error", "message": "only Instagram Author or Single Post/Reel URLs are supported"})
         return 2
     if media_type not in {"image", "video", "mixed"}:
         _write({"type": "error", "message": f"unsupported media_type: {media_type}"})
@@ -135,9 +173,14 @@ def run(start: dict[str, Any]) -> int:
         config.set(("extractor", "instagram"), "cookies", {str(key): str(value) for key, value in cookies.items()})
         config.set(("extractor", "instagram"), "videos", True)
         config.set(("extractor", "instagram"), "audio", False)
-        instance = extractor.find(url)
-        if instance is None or instance.category != "instagram" or instance.subcategory not in {"post", "reel"}:
-            _write({"type": "error", "message": "gallery-dl did not resolve an Instagram Single Post/Reel extractor"})
+        extractor_url = url
+        if is_author:
+            extractor_url = url.rstrip("/") + "/posts/"
+        instance = extractor.find(extractor_url)
+        expected_subcategories = {"post", "reel"} if is_post else {"posts"}
+        if instance is None or instance.category != "instagram" or instance.subcategory not in expected_subcategories:
+            mode = "Single Post/Reel" if is_post else "Author"
+            _write({"type": "error", "message": f"gallery-dl did not resolve an Instagram {mode} extractor"})
             return 2
         instance.initialize()
         cookie_loaded = bool(instance.cookies_check(instance.cookies_names, instance.cookies_domain, True))
@@ -165,7 +208,9 @@ def run(start: dict[str, Any]) -> int:
         ):
             _write({"type": "error", "code": "AUTH_REQUIRED", "message": "Instagram auth invalid"})
             return 2
-        candidates = _matching_items(iter(instance.items()), media_type)
+        # SMC owns media-type filtering so skipped videos/images still advance
+        # the same lazy iterator and do not affect target_count.
+        candidates = _matching_items(iter(instance.items()), "mixed")
     except Exception as exc:
         _write({"type": "error", "message": f"gallery-dl initialization failed: {type(exc).__name__}: {exc}"})
         return 1
@@ -197,7 +242,12 @@ def run(start: dict[str, Any]) -> int:
 
 
 def main() -> int:
-    line = sys.stdin.readline()
+    _configure_stdio_utf8()
+    try:
+        line = _readline_utf8(sys.stdin)
+    except UnicodeError as exc:
+        _write({"type": "error", "message": f"invalid UTF-8 start JSON: {exc}"})
+        return 2
     if not line:
         return 2
     try:

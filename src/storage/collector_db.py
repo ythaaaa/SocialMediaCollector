@@ -130,12 +130,27 @@ class CollectorDatabase:
                 return self._row(row)
         return None
 
-    def find_duplicate(self, candidate: Any, source_value: str = "") -> dict[str, Any] | None:
+    def find_duplicate(
+        self,
+        candidate: Any,
+        source_value: str = "",
+        *,
+        require_local_file: bool = True,
+    ) -> dict[str, Any] | None:
+        """Find a previously registered media item.
+
+        Existing callers retain the historical local-file check.  The opt-in
+        policy used by a task can instead treat the database record itself as
+        the historical duplicate, even when the old local file was removed.
+        """
         try:
             with self._connect() as db:
                 row = self._find_media(db, candidate, source_value)
                 if not row:
                     return None
+                if not require_local_file:
+                    db.execute("UPDATE media_index SET last_seen_at = ? WHERE id = ?", (self._now(), row["id"]))
+                    return row
                 if self._local_exists(row):
                     db.execute("UPDATE media_index SET last_seen_at = ? WHERE id = ?", (self._now(), row["id"]))
                     return row
@@ -148,14 +163,24 @@ class CollectorDatabase:
             self._warn(exc)
             return None
 
-    def find_hash_duplicate(self, file_hash: str, current_file: Path | None = None) -> dict[str, Any] | None:
+    def find_hash_duplicate(
+        self,
+        file_hash: str,
+        current_file: Path | None = None,
+        *,
+        require_local_file: bool = True,
+    ) -> dict[str, Any] | None:
         if not file_hash:
             return None
         try:
             with self._connect() as db:
                 for row in db.execute("SELECT * FROM media_index WHERE file_hash = ? ORDER BY id", (file_hash,)):
                     item = self._row(row)
-                    if item and self._local_exists(item) and Path(item["local_file"]) != (current_file or Path("")):
+                    if (
+                        item
+                        and (not require_local_file or self._local_exists(item))
+                        and Path(item["local_file"]) != (current_file or Path(""))
+                    ):
                         db.execute("UPDATE media_index SET last_seen_at = ? WHERE id = ?", (self._now(), item["id"]))
                         return item
                 return None

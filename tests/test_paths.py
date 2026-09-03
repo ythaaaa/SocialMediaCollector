@@ -18,6 +18,18 @@ def test_collection_mode_is_backward_compatible() -> None:
     TaskConfig(**base, collection_mode="current_page").validate()
     legacy = TaskConfig.from_dict({"keyword": "old", "target_count": 1, "output_root": "out"})
     assert legacy.canonical_collection_mode() == "search"
+    assert legacy.skip_history_duplicates is False
+
+
+def test_history_dedup_config_round_trips_and_defaults_false() -> None:
+    config = TaskConfig.from_dict({
+        "keyword": "old",
+        "target_count": 1,
+        "output_root": "out",
+        "skip_history_duplicates": True,
+    })
+    assert config.skip_history_duplicates is True
+    assert TaskConfig.from_dict({"keyword": "old", "target_count": 1, "output_root": "out", "skip_history_duplicates": "false"}).skip_history_duplicates is False
 
 
 def test_consecutive_task_directories_are_siblings_under_save_root(tmp_path: Path) -> None:

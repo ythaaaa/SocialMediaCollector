@@ -1,4 +1,6 @@
 from pathlib import Path
+from unittest.mock import Mock
+import hashlib
 
 import httpx
 import pytest
@@ -9,6 +11,7 @@ from src.downloader import engine as engine_module
 from src.downloader.dash import DASHDownloadCancelled
 from src.downloader.engine import DownloadEngine
 from src.downloader.hls import HLSDownloadError
+from src.adapters.instagram_gallerydl import GalleryDlError
 from src.models import TaskConfig
 from src.storage import CollectorDatabase, TaskStore
 
@@ -120,6 +123,119 @@ def test_image_download_falls_back_when_highest_quality_url_fails(tmp_path: Path
     assert (engine.task_dir / "images" / "0001.png").exists()
     metadata = (engine.task_dir / "metadata.csv").read_text(encoding="utf-8-sig")
     assert fallback in metadata
+
+
+def test_current_task_identity_duplicate_is_always_skipped(tmp_path: Path, monkeypatch) -> None:
+    config = TaskConfig("test", 2, tmp_path / "output", interval_seconds=0)
+    database = Mock()
+    database.find_duplicate.return_value = None
+    engine = DownloadEngine(config, tmp_path / "profile", database=database)
+    engine.task_dir = tmp_path / "task"
+    engine.task_dir.mkdir()
+    store = TaskStore(engine.task_dir, config)
+    downloaded: list[str] = []
+
+    def fake_download(_client, candidate, _store, _known) -> None:
+        downloaded.append(candidate.media_url)
+        engine.stats.downloaded += 1
+
+    monkeypatch.setattr(engine, "_download_one", fake_download)
+    first = ImageCandidate("", "", media_url="https://cdn.test/a.jpg", media_identity="pin:1")
+    second = ImageCandidate("", "", media_url="https://cdn.test/other-signed.jpg", media_identity="pin:1")
+
+    engine._process_candidate(object(), first, store, set())
+    engine._process_candidate(object(), second, store, set())
+
+    assert downloaded == ["https://cdn.test/a.jpg"]
+    assert engine.stats.duplicate_count == 1
+    database.find_duplicate.assert_not_called()
+
+
+@pytest.mark.parametrize("skip_history", [False, True])
+def test_history_identity_switch_controls_author_candidate(tmp_path: Path, monkeypatch, skip_history: bool) -> None:
+    config = TaskConfig(
+        "",
+        1,
+        tmp_path / "output",
+        platform="instagram",
+        collection_mode="author",
+        source_identifier="alice",
+        media_type="mixed",
+        interval_seconds=0,
+        skip_history_duplicates=skip_history,
+    )
+    database = Mock()
+    database.find_duplicate.return_value = {"id": 1} if skip_history else None
+    engine = DownloadEngine(config, tmp_path / "profile", database=database)
+    engine.task_dir = tmp_path / "task"
+    engine.task_dir.mkdir()
+    store = TaskStore(engine.task_dir, config)
+    downloaded: list[str] = []
+
+    def fake_download(_client, candidate, _store, _known) -> None:
+        downloaded.append(candidate.media_identity)
+        engine.stats.downloaded += 1
+
+    monkeypatch.setattr(engine, "_download_one", fake_download)
+    candidate = ImageCandidate("", "", platform="instagram", media_url="media", media_identity="POST:0")
+    engine._process_candidate(object(), candidate, store, set())
+
+    assert downloaded == ([] if skip_history else ["POST:0"])
+    assert engine.stats.duplicate_count == (1 if skip_history else 0)
+    if skip_history:
+        database.find_duplicate.assert_called_once_with(candidate, "alice", require_local_file=False)
+    else:
+        database.find_duplicate.assert_not_called()
+
+
+def test_historical_sha256_check_is_opt_in_and_current_hash_is_always_checked(tmp_path: Path) -> None:
+    payload = _image_bytes((4, 4), "orange")
+
+    class Client:
+        def get(self, _url, **_kwargs):
+            return type("Response", (), {"content": payload, "raise_for_status": lambda self: None})()
+
+    candidate = ImageCandidate("image", "https://example.test/post/1", media_url="image")
+    for skip_history, expected_downloads, expected_hash_calls in ((False, 1, 0), (True, 0, 1)):
+        config = TaskConfig("test", 1, tmp_path / f"output-{skip_history}", min_width=2, min_height=2, interval_seconds=0, skip_history_duplicates=skip_history)
+        database = Mock()
+        database.find_hash_duplicate.return_value = {"id": 1}
+        engine = DownloadEngine(config, tmp_path / "profile", database=database)
+        engine.task_dir = tmp_path / f"task-{skip_history}"
+        engine.task_dir.mkdir()
+        (engine.task_dir / "images").mkdir()
+        store = TaskStore(engine.task_dir, config)
+        engine._download_one(Client(), candidate, store, set())
+        assert engine.stats.downloaded == expected_downloads
+        assert database.find_hash_duplicate.call_count == expected_hash_calls
+        if skip_history:
+            assert database.find_hash_duplicate.call_args.args == (hashlib.sha256(payload).hexdigest(),)
+            assert database.find_hash_duplicate.call_args.kwargs == {"require_local_file": False}
+
+
+def test_current_task_sha256_duplicate_is_skipped_when_history_dedup_is_off(tmp_path: Path) -> None:
+    payload = _image_bytes((4, 4), "orange")
+
+    class Client:
+        def get(self, _url, **_kwargs):
+            return type("Response", (), {"content": payload, "raise_for_status": lambda self: None})()
+
+    config = TaskConfig("test", 2, tmp_path / "output", min_width=2, min_height=2, interval_seconds=0)
+    database = Mock()
+    engine = DownloadEngine(config, tmp_path / "profile", database=database)
+    engine.task_dir = tmp_path / "task-current-hash"
+    engine.task_dir.mkdir()
+    (engine.task_dir / "images").mkdir()
+    store = TaskStore(engine.task_dir, config)
+    first = ImageCandidate("first", "https://example.test/post/1", media_url="first", media_identity="first")
+    second = ImageCandidate("second", "https://example.test/post/2", media_url="second", media_identity="second")
+
+    engine._download_one(Client(), first, store, set())
+    engine._download_one(Client(), second, store, set())
+
+    assert engine.stats.downloaded == 1
+    assert engine.stats.duplicate_count == 1
+    database.find_hash_duplicate.assert_not_called()
 
 
 def test_engine_reports_task_directory_as_soon_as_it_is_created(tmp_path: Path, monkeypatch) -> None:
@@ -249,6 +365,100 @@ def test_engine_routes_instagram_to_shared_collector_and_normalizes_config(tmp_p
     assert observed["author_source"] == "alice"
     task_data = (task_dir / "task.json").read_text(encoding="utf-8")
     assert '"source_page_url": "https://www.instagram.com/alice/"' in task_data
+
+
+def test_gallerydl_author_keeps_requesting_after_duplicate_and_failed_until_target(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("SMC_INSTAGRAM_GALLERYDL_POC", "1")
+    seen: list[str] = []
+    candidates = [
+        ImageCandidate("", "", platform="instagram", author_username="alice", shortcode="DUP", media_url="dup", media_identity="DUP:0"),
+        ImageCandidate("", "", platform="instagram", author_username="alice", shortcode="FAIL", media_url="fail", media_identity="FAIL:0"),
+        ImageCandidate("", "", platform="instagram", author_username="alice", shortcode="NEW1", media_url="new1", media_identity="NEW1:0"),
+        ImageCandidate("", "", platform="instagram", author_username="alice", shortcode="NEW2", media_url="new2", media_identity="NEW2:0"),
+        ImageCandidate("", "", platform="instagram", author_username="alice", shortcode="NEW3", media_url="new3", media_identity="NEW3:0"),
+        ImageCandidate("", "", platform="instagram", author_username="alice", shortcode="EXTRA", media_url="extra", media_identity="EXTRA:0"),
+    ]
+
+    class GalleryAdapter:
+        def collect(self, _url, *, on_candidate, **_kwargs):
+            delivered = 0
+            for candidate in candidates:
+                delivered += 1
+                if not on_candidate(candidate):
+                    break
+            return delivered
+
+    monkeypatch.setattr(engine_module, "InstagramGalleryDlAdapter", GalleryAdapter)
+    config = TaskConfig(
+        "",
+        3,
+        tmp_path / "output",
+        platform="instagram",
+        collection_mode="author",
+        source_identifier="@alice",
+        media_type="mixed",
+        interval_seconds=0,
+    )
+    engine = DownloadEngine(
+        config,
+        tmp_path / "profile",
+        database=CollectorDatabase(tmp_path / "collector.db"),
+    )
+
+    def fake_process(_client, candidate, _store, _known):
+        seen.append(candidate.shortcode)
+        if candidate.shortcode == "DUP":
+            engine.stats.duplicate_count += 1
+        elif candidate.shortcode == "FAIL":
+            engine.stats.failed += 1
+        else:
+            engine.stats.downloaded += 1
+
+    monkeypatch.setattr(engine, "_process_candidate", fake_process)
+    task_dir = engine.run()
+
+    assert seen == ["DUP", "FAIL", "NEW1", "NEW2", "NEW3"]
+    assert engine.stats.downloaded == 3
+    assert engine.stats.duplicate_count == 1
+    assert engine.stats.failed == 1
+    assert '"downloaded": 3' in (task_dir / "task.json").read_text(encoding="utf-8")
+
+
+def test_gallerydl_author_exhausted_before_target_is_failed(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("SMC_INSTAGRAM_GALLERYDL_POC", "1")
+
+    class GalleryAdapter:
+        def collect(self, _url, *, on_candidate, **_kwargs):
+            on_candidate(ImageCandidate(
+                "", "", platform="instagram", author_username="alice",
+                shortcode="ONLY", media_url="only", media_identity="ONLY:0",
+            ))
+            return 1
+
+    monkeypatch.setattr(engine_module, "InstagramGalleryDlAdapter", GalleryAdapter)
+    config = TaskConfig(
+        "",
+        2,
+        tmp_path / "output",
+        platform="instagram",
+        collection_mode="author",
+        source_identifier="alice",
+        media_type="image",
+        interval_seconds=0,
+    )
+    engine = DownloadEngine(
+        config,
+        tmp_path / "profile",
+        database=CollectorDatabase(tmp_path / "collector.db"),
+    )
+    monkeypatch.setattr(engine, "_process_candidate", lambda *_args: None)
+
+    with pytest.raises(GalleryDlError, match="source exhausted before target reached"):
+        engine.run()
+
+    history = engine.database.get_history(config.task_id)
+    assert history["status"] == "failed"
+    assert history["error_message"] == "source exhausted before target reached"
 
 
 def test_engine_rejects_instagram_without_manual_login_browser(tmp_path: Path) -> None:

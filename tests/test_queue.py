@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import threading
 import time
+import json
 from pathlib import Path
 
 import pytest
@@ -83,6 +84,24 @@ def test_queue_tasks_create_sibling_directories_under_one_save_root(tmp_path: Pa
 
     assert all(config.output_root == tmp_path for config in configs)
     assert all(directory.parent == tmp_path for directory in directories)
+
+
+def test_queue_persists_history_dedup_policy(tmp_path: Path) -> None:
+    config = TaskConfig(
+        "cats",
+        1,
+        tmp_path,
+        platform="pinterest",
+        collection_mode="search",
+        skip_history_duplicates=True,
+    )
+    store = QueueStore(tmp_path / "queue.json")
+    store.save([QueueTask(config)])
+
+    loaded = store.load()
+    assert len(loaded) == 1
+    assert loaded[0].config.skip_history_duplicates is True
+    assert json.loads((tmp_path / "queue.json").read_text(encoding="utf-8"))["tasks"][0]["config"]["skip_history_duplicates"] is True
 
 
 def test_remove_selected_tasks_updates_queue_json_and_reload(tmp_path: Path) -> None:

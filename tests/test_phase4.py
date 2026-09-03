@@ -33,6 +33,7 @@ def test_media_index_schema_and_url_dedup(tmp_path: Path) -> None:
     assert db.find_duplicate(candidate, "cats") is not None
     local.unlink()
     assert db.find_duplicate(candidate, "cats") is None
+    assert db.find_duplicate(candidate, "cats", require_local_file=False) is not None
 
 
 def test_hash_dedup_and_platform_media_identity(tmp_path: Path) -> None:
@@ -44,11 +45,21 @@ def test_hash_dedup_and_platform_media_identity(tmp_path: Path) -> None:
     db.register_media(pinterest, "source", "same-hash", local, "task-a")
     assert db.find_duplicate(x_video, "source") is None
     assert db.find_hash_duplicate("same-hash") is not None
+    local.unlink()
+    assert db.find_hash_duplicate("same-hash") is None
+    assert db.find_hash_duplicate("same-hash", require_local_file=False) is not None
 
 
 def test_task_history_lifecycle_and_config_reload(tmp_path: Path) -> None:
     db = CollectorDatabase(tmp_path / "collector.db")
-    config = TaskConfig("cats", 3, tmp_path / "root", platform="pinterest", collection_mode="search")
+    config = TaskConfig(
+        "cats",
+        3,
+        tmp_path / "root",
+        platform="pinterest",
+        collection_mode="search",
+        skip_history_duplicates=True,
+    )
     output = tmp_path / "root" / "cats_1"
     db.start_task(config, output)
     assert db.get_history(config.task_id)["status"] == "running"
@@ -57,7 +68,9 @@ def test_task_history_lifecycle_and_config_reload(tmp_path: Path) -> None:
     assert row["success_count"] == 2
     assert row["duplicate_count"] == 1
     assert row["failed_count"] == 1
-    assert db.load_task_config(config.task_id).output_root == config.output_root
+    loaded = db.load_task_config(config.task_id)
+    assert loaded.output_root == config.output_root
+    assert loaded.skip_history_duplicates is True
 
 
 def test_running_history_is_marked_interrupted(tmp_path: Path) -> None:

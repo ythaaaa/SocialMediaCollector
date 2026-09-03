@@ -8,7 +8,7 @@ import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable, Protocol
+from typing import Any, Callable, Mapping, Protocol
 
 from src.browser.collector import ImageCandidate, PinterestVideoSource
 from src.browser.instagram_collector import media_identity
@@ -19,6 +19,8 @@ from src.utils.runtime import subprocess_creation_flags
 
 
 POC_ENVIRONMENT_VARIABLE = "SMC_INSTAGRAM_GALLERYDL_POC"
+GALLERYDL_PYTHON_ENVIRONMENT_VARIABLE = "SMC_GALLERYDL_PYTHON"
+GALLERYDL_HOME_ENVIRONMENT_VARIABLE = "SMC_GALLERYDL_HOME"
 DEFAULT_GALLERY_DL_ROOT = Path.home() / "Desktop" / "gallery-dl"
 
 
@@ -28,6 +30,139 @@ class GalleryDlError(RuntimeError):
 
 class GalleryDlStopped(RuntimeError):
     """The caller requested that the isolated gallery-dl helper stop."""
+
+
+def _gallerydl_python_for_root(root: Path, *, windows: bool | None = None) -> Path:
+    windows = os.name == "nt" if windows is None else windows
+    executable = "python.exe" if windows else "python"
+    scripts = "Scripts" if windows else "bin"
+    return Path(root) / ".venv" / scripts / executable
+
+
+def _windows_desktop_directory() -> Path | None:
+    """Return the actual Windows Desktop, including redirected Known Folders."""
+    if os.name != "nt":
+        return None
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        class GUID(ctypes.Structure):
+            _fields_ = [
+                ("Data1", wintypes.DWORD),
+                ("Data2", wintypes.WORD),
+                ("Data3", wintypes.WORD),
+                ("Data4", wintypes.BYTE * 8),
+            ]
+
+        desktop_id = GUID(
+            0xB4BFCC3A,
+            0xDB2C,
+            0x424C,
+            (wintypes.BYTE * 8)(0xB0, 0x29, 0x7F, 0xE9, 0x9A, 0x87, 0xC6, 0x41),
+        )
+        shell32 = ctypes.windll.shell32
+        shell32.SHGetKnownFolderPath.argtypes = [
+            ctypes.POINTER(GUID),
+            wintypes.DWORD,
+            wintypes.HANDLE,
+            ctypes.POINTER(ctypes.c_wchar_p),
+        ]
+        shell32.SHGetKnownFolderPath.restype = ctypes.c_long
+        path_pointer = ctypes.c_wchar_p()
+        result = shell32.SHGetKnownFolderPath(
+            ctypes.byref(desktop_id), 0, None, ctypes.byref(path_pointer)
+        )
+        if result != 0 or not path_pointer.value:
+            return None
+        try:
+            return Path(path_pointer.value)
+        finally:
+            ctypes.windll.ole32.CoTaskMemFree(path_pointer)
+    except (AttributeError, OSError, TypeError, ValueError):
+        return None
+
+
+def _nearby_gallerydl_roots() -> tuple[Path, ...]:
+    """Find gallery-dl roots placed beside the source project."""
+    project_root = Path(__file__).resolve().parents[2]
+    return (
+        project_root.parent / "gallery-dl",
+        project_root.parent.parent / "gallery-dl",
+    )
+
+
+def _gallerydl_not_found(checked: list[Path]) -> GalleryDlError:
+    paths = "\n".join(f"- {path}" for path in checked)
+    return GalleryDlError(f"gallery-dl helper not found\nchecked candidate paths:\n{paths}")
+
+
+def resolve_gallerydl_python(
+    environ: Mapping[str, str] | None = None,
+    *,
+    desktop_directory: Path | None = None,
+    home_directory: Path | None = None,
+) -> Path:
+    """Resolve the isolated gallery-dl Python executable without machine paths.
+
+    The optional directory arguments are dependency-injection points for tests;
+    normal callers should only provide ``environ`` when they need custom env.
+    """
+    values = os.environ if environ is None else environ
+    home = Path.home() if home_directory is None else Path(home_directory)
+    checked: list[Path] = []
+    seen: set[Path] = set()
+
+    def candidate(path: Path) -> Path | None:
+        path = Path(path)
+        if path not in seen:
+            seen.add(path)
+            checked.append(path)
+        return path if path.is_file() else None
+
+    explicit_python = str(values.get(GALLERYDL_PYTHON_ENVIRONMENT_VARIABLE, "")).strip()
+    if explicit_python:
+        resolved = candidate(Path(explicit_python))
+        if resolved:
+            return resolved
+
+    explicit_home = str(values.get(GALLERYDL_HOME_ENVIRONMENT_VARIABLE, "")).strip()
+    if explicit_home:
+        resolved = candidate(_gallerydl_python_for_root(Path(explicit_home)))
+        if resolved:
+            return resolved
+
+    desktop = _windows_desktop_directory() if desktop_directory is None else Path(desktop_directory)
+    if desktop:
+        resolved = candidate(_gallerydl_python_for_root(desktop / "gallery-dl"))
+        if resolved:
+            return resolved
+
+    for root in _nearby_gallerydl_roots():
+        resolved = candidate(_gallerydl_python_for_root(root))
+        if resolved:
+            return resolved
+
+    resolved = candidate(_gallerydl_python_for_root(home / "Desktop" / "gallery-dl"))
+    if resolved:
+        return resolved
+    raise _gallerydl_not_found(checked)
+
+
+def _gallerydl_root_from_python(python_executable: Path) -> Path:
+    """Derive the gallery-dl checkout root from its isolated venv Python."""
+    executable = Path(python_executable)
+    if executable.parent.name.lower() in {"scripts", "bin"} and executable.parent.parent.name == ".venv":
+        return executable.parent.parent.parent
+    return DEFAULT_GALLERY_DL_ROOT
+
+
+def _gallerydl_helper_environment() -> dict[str, str]:
+    """Force the child Python standard streams to use UTF-8 on Windows."""
+    environment = os.environ.copy()
+    environment["PYTHONUTF8"] = "1"
+    environment["PYTHONIOENCODING"] = "utf-8"
+    return environment
 
 
 def gallerydl_poc_enabled(environ: dict[str, str] | None = None) -> bool:
@@ -203,8 +338,20 @@ class GalleryDlWorkerClient:
         self.url = url
         self.profile_path = Path(profile_path)
         self.media_type = media_type
-        self.python_executable = Path(python_executable or self._default_python())
-        self.gallery_dl_root = Path(gallery_dl_root or DEFAULT_GALLERY_DL_ROOT)
+        if python_executable is None:
+            if gallery_dl_root is None:
+                self.python_executable = self._default_python()
+            else:
+                self.python_executable = _gallerydl_python_for_root(Path(gallery_dl_root))
+                if not self.python_executable.is_file():
+                    raise _gallerydl_not_found([self.python_executable])
+        else:
+            self.python_executable = Path(python_executable)
+            if not self.python_executable.is_file():
+                raise _gallerydl_not_found([self.python_executable])
+        self.gallery_dl_root = Path(
+            gallery_dl_root or _gallerydl_root_from_python(self.python_executable)
+        )
         self.worker_script = Path(worker_script or Path(__file__).with_name("gallerydl_worker.py"))
         self.cookies = dict(cookies or {})
         self._popen_factory = popen_factory
@@ -214,10 +361,7 @@ class GalleryDlWorkerClient:
 
     @staticmethod
     def _default_python() -> Path:
-        root = DEFAULT_GALLERY_DL_ROOT
-        if os.name == "nt":
-            return root / ".venv" / "Scripts" / "python.exe"
-        return root / ".venv" / "bin" / "python"
+        return resolve_gallerydl_python()
 
     @property
     def process(self) -> Any | None:
@@ -240,6 +384,7 @@ class GalleryDlWorkerClient:
                 encoding="utf-8",
                 errors="replace",
                 bufsize=1,
+                env=_gallerydl_helper_environment(),
                 creationflags=subprocess_creation_flags(),
             )
         except OSError as exc:
@@ -251,6 +396,12 @@ class GalleryDlWorkerClient:
             daemon=True,
         )
         thread.start()
+        stderr_thread = threading.Thread(
+            target=self._read_stderr,
+            name="gallery-dl-worker-stderr",
+            daemon=True,
+        )
+        stderr_thread.start()
         self._send_json(
             {
                 "type": "start",
@@ -280,6 +431,17 @@ class GalleryDlWorkerClient:
             self._events.put({"type": "error", "message": f"helper stdout failed: {exc}"})
         finally:
             self._events.put(None)
+
+    def _read_stderr(self) -> None:
+        """Drain helper diagnostics without allowing locale decoding to fail."""
+        process = self._process
+        if process is None or process.stderr is None:
+            return
+        try:
+            for _line in process.stderr:
+                pass
+        except (OSError, UnicodeError, ValueError):
+            pass
 
     def _send_json(self, message: dict[str, Any]) -> None:
         process = self._process
@@ -382,6 +544,7 @@ class InstagramGalleryDlAdapter:
         url: str,
         *,
         media_type: str = "mixed",
+        author_username: str | None = None,
         stop_event: threading.Event | None = None,
         pause_event: threading.Event | None = None,
         on_candidate: Callable[[ImageCandidate], bool | None],
@@ -404,7 +567,9 @@ class InstagramGalleryDlAdapter:
                 raise
         if not self.cookies.get("sessionid"):
             raise InstagramAuthRequired("Instagram cookie loaded=no; sessionid 未找到")
-        client = self.create_client(url, media_type)
+        requested_media_type = (media_type or "mixed").strip().lower()
+        expected_username = (author_username or "").strip().lstrip("@").casefold()
+        client = self.create_client(url, "mixed")
         delivered = 0
         pause_sent = False
         try:
@@ -444,6 +609,14 @@ class InstagramGalleryDlAdapter:
                     raise GalleryDlError(f"unexpected gallery-dl event: {event_type}")
 
                 candidate = candidate_from_gallerydl(event)
+                if expected_username and candidate.author_username.casefold() != expected_username:
+                    if on_log:
+                        on_log("Instagram candidate skipped: author ownership mismatch")
+                    continue
+                if requested_media_type != "mixed" and candidate.media_type != requested_media_type:
+                    if on_log:
+                        on_log(f"Instagram candidate skipped: media_type={candidate.media_type}")
+                    continue
                 delivered += 1
                 if on_log:
                     on_log("Instagram candidate discovered")

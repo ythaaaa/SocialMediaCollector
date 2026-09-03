@@ -1,8 +1,12 @@
 from __future__ import annotations
 
+import io
+import json
+import sys
 import threading
 import time
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -12,8 +16,10 @@ from src.adapters.instagram_gallerydl import (
     InstagramGalleryDlAdapter,
     candidate_from_gallerydl,
     gallerydl_poc_enabled,
+    resolve_gallerydl_python,
 )
 from src.adapters.instagram_cookie_bridge import load_instagram_cookies, save_instagram_cookies
+from src.adapters import gallerydl_worker
 
 
 def image_payload(**extra):
@@ -97,6 +103,346 @@ def test_feature_flag_is_opt_in():
     assert not gallerydl_poc_enabled({})
     assert gallerydl_poc_enabled({"SMC_INSTAGRAM_GALLERYDL_POC": "1"})
     assert gallerydl_poc_enabled({"SMC_INSTAGRAM_GALLERYDL_POC": "true"})
+
+
+def _fake_gallerydl_python(root: Path) -> Path:
+    executable = root / ".venv" / "Scripts" / "python.exe"
+    executable.parent.mkdir(parents=True)
+    executable.write_bytes(b"fixture")
+    return executable
+
+
+def test_gallerydl_python_environment_override_has_highest_priority(tmp_path: Path):
+    explicit = tmp_path / "explicit-python.exe"
+    explicit.write_bytes(b"fixture")
+    env_home = _fake_gallerydl_python(tmp_path / "env-home")
+
+    resolved = resolve_gallerydl_python(
+        {
+            "SMC_GALLERYDL_PYTHON": str(explicit),
+            "SMC_GALLERYDL_HOME": str(env_home.parents[2]),
+        },
+        desktop_directory=tmp_path / "desktop",
+        home_directory=tmp_path / "user",
+    )
+
+    assert resolved == explicit
+
+
+def test_gallerydl_home_environment_override(tmp_path: Path):
+    root = tmp_path / "env-home"
+    expected = _fake_gallerydl_python(root)
+
+    assert resolve_gallerydl_python(
+        {"SMC_GALLERYDL_HOME": str(root)},
+        desktop_directory=tmp_path / "desktop",
+        home_directory=tmp_path / "user",
+    ) == expected
+
+
+def test_gallerydl_finds_redirected_windows_desktop(tmp_path: Path):
+    desktop = tmp_path / "redirected-desktop"
+    expected = _fake_gallerydl_python(desktop / "gallery-dl")
+
+    assert resolve_gallerydl_python(
+        {},
+        desktop_directory=desktop,
+        home_directory=tmp_path / "user",
+    ) == expected
+
+
+def test_gallerydl_finds_checkout_near_project(monkeypatch, tmp_path: Path):
+    root = tmp_path / "nearby-gallery-dl"
+    expected = _fake_gallerydl_python(root)
+    monkeypatch.setattr(
+        "src.adapters.instagram_gallerydl._nearby_gallerydl_roots",
+        lambda: (root,),
+    )
+
+    assert resolve_gallerydl_python(
+        {},
+        desktop_directory=tmp_path / "desktop",
+        home_directory=tmp_path / "user",
+    ) == expected
+
+
+def test_gallerydl_falls_back_to_legacy_home_desktop(monkeypatch, tmp_path: Path):
+    legacy = tmp_path / "user" / "Desktop" / "gallery-dl"
+    expected = _fake_gallerydl_python(legacy)
+    monkeypatch.setattr(
+        "src.adapters.instagram_gallerydl._nearby_gallerydl_roots",
+        lambda: (),
+    )
+
+    assert resolve_gallerydl_python(
+        {},
+        desktop_directory=tmp_path / "desktop",
+        home_directory=tmp_path / "user",
+    ) == expected
+
+
+def test_gallerydl_missing_helper_has_clear_checked_paths(monkeypatch, tmp_path: Path):
+    monkeypatch.setattr(
+        "src.adapters.instagram_gallerydl._nearby_gallerydl_roots",
+        lambda: (),
+    )
+    with pytest.raises(GalleryDlError) as error:
+        resolve_gallerydl_python(
+            {"SMC_GALLERYDL_PYTHON": str(tmp_path / "missing.exe")},
+            desktop_directory=tmp_path / "desktop",
+            home_directory=tmp_path / "user",
+        )
+
+    message = str(error.value)
+    assert "gallery-dl helper not found" in message
+    assert "checked candidate paths:" in message
+    assert str(tmp_path / "missing.exe") in message
+    assert str(tmp_path / "user" / "Desktop" / "gallery-dl" / ".venv" / "Scripts" / "python.exe") in message
+
+
+def test_worker_jsonl_utf8_preserves_unicode_nested_metadata(monkeypatch):
+    unicode_text = "测试 😂 📷 한국어 日本語"
+    stdout = io.BytesIO()
+    monkeypatch.setattr(gallerydl_worker.sys, "stdout", type("BinaryStdout", (), {"buffer": stdout})())
+
+    gallerydl_worker._write(
+        gallerydl_worker._candidate_payload(
+            {
+                "post_id": "post-unicode",
+                "post_shortcode": "UNICODE1",
+                "post_url": "https://www.instagram.com/reel/UNICODE1/",
+                "username": unicode_text,
+                "description": unicode_text,
+            },
+            {
+                "shortcode": "UNICODE1",
+                "num": 1,
+                "display_url": "https://cdn.example/reel.jpg",
+                "video_url": "https://cdn.example/reel.mp4",
+            },
+        )
+    )
+
+    event = json.loads(stdout.getvalue().decode("utf-8"))
+    assert event["description"] == unicode_text
+    assert event["username"] == unicode_text
+    assert event["metadata"]["description"] == unicode_text
+    candidate = candidate_from_gallerydl(event)
+    assert candidate.author_username == unicode_text
+    assert candidate.caption == unicode_text
+    assert candidate.post_text == unicode_text
+
+
+def test_parent_reads_utf8_jsonl_and_preserves_unicode():
+    unicode_text = "测试 😂 📷 한국어 日本語"
+    event = image_payload(
+        username=unicode_text,
+        description=unicode_text,
+        caption=unicode_text,
+        metadata={"nested": unicode_text},
+    )
+    stdout = io.TextIOWrapper(
+        io.BytesIO((json.dumps(event, ensure_ascii=False) + "\n").encode("utf-8")),
+        encoding="utf-8",
+    )
+    stderr = io.TextIOWrapper(io.BytesIO("gallery warning 😂\n".encode("utf-8")), encoding="utf-8")
+
+    class Process:
+        def __init__(self):
+            self.stdin = io.StringIO()
+            self.stdout = stdout
+            self.stderr = stderr
+
+        def poll(self):
+            return 0
+
+    client = GalleryDlWorkerClient(
+        "https://www.instagram.com/p/UNICODE1/",
+        Path("profile"),
+        python_executable=Path(sys.executable),
+        gallery_dl_root=Path("gallery-dl"),
+    )
+    client._process = Process()
+    client._read_stdout()
+    client._read_stderr()
+
+    received = client.read_event(threading.Event())
+    candidate = candidate_from_gallerydl(received)
+    assert received["caption"] == unicode_text
+    assert received["metadata"]["nested"] == unicode_text
+    assert candidate.caption == unicode_text
+
+
+def test_parent_forces_utf8_child_environment(monkeypatch):
+    captured = {}
+
+    class Process:
+        stdin = io.StringIO()
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+
+        def poll(self):
+            return 0
+
+    def fake_popen(*args, **kwargs):
+        captured.update(kwargs)
+        return Process()
+
+    client = GalleryDlWorkerClient(
+        "https://www.instagram.com/p/UNICODE1/",
+        Path("profile"),
+        python_executable=Path(sys.executable),
+        gallery_dl_root=Path("gallery-dl"),
+        popen_factory=fake_popen,
+    )
+    client.start()
+
+    assert captured["encoding"] == "utf-8"
+    assert captured["errors"] == "replace"
+    assert captured["env"]["PYTHONUTF8"] == "1"
+    assert captured["env"]["PYTHONIOENCODING"] == "utf-8"
+
+
+def test_author_message_stream_expands_carousel_with_stable_post_identity():
+    post = {
+        "post_id": "post-carousel",
+        "post_shortcode": "CAROUSEL1",
+        "post_url": "https://www.instagram.com/p/CAROUSEL1/",
+        "username": "alice",
+        "description": "carousel",
+        "post_date": "2026-09-03T00:00:00+00:00",
+    }
+    items = [
+        (2, "", post),
+        (3, "https://cdn.example/1.jpg", {"num": 1, "display_url": "https://cdn.example/1.jpg"}),
+        (3, "https://cdn.example/2.jpg", {"num": 2, "display_url": "https://cdn.example/2.jpg"}),
+        (3, "https://cdn.example/3.mp4", {"num": 3, "display_url": "https://cdn.example/3.jpg", "video_url": "https://cdn.example/3.mp4"}),
+    ]
+
+    events = list(gallerydl_worker._matching_items(iter(items), "mixed"))
+
+    assert [event["media_identity"] for event in events] == [
+        "CAROUSEL1:0", "CAROUSEL1:1", "CAROUSEL1:2",
+    ]
+    assert [event["media_type"] for event in events] == ["image", "image", "video"]
+    assert all(event["username"] == "alice" for event in events)
+
+
+def test_author_adapter_filters_media_and_ownership_then_requests_next():
+    fake = FakeClient([
+        {"type": "ready", "cookie_loaded": True},
+        image_payload(username="bob"),
+        image_payload(media_type="video", video_url="https://cdn.example/video.mp4", username="alice"),
+        image_payload(username="alice", shortcode="NEXT1"),
+        {"type": "exhausted"},
+    ])
+    adapter = InstagramGalleryDlAdapter(
+        profile_path=Path("profile"),
+        client_factory=lambda *args, **kwargs: fake,
+        cookies={"sessionid": "fixture"},
+    )
+    seen = []
+
+    assert adapter.collect(
+        "https://www.instagram.com/alice/",
+        media_type="image",
+        author_username="alice",
+        on_candidate=lambda candidate: seen.append(candidate) or True,
+    ) == 1
+    assert [candidate.shortcode for candidate in seen] == ["NEXT1"]
+    assert fake.commands == ["start", "next", "next", "next", "next"]
+
+
+def test_author_adapter_pause_resume_keeps_candidate_position():
+    fake = FakeClient([
+        {"type": "ready", "cookie_loaded": True},
+        image_payload(username="alice"),
+        image_payload(username="alice", shortcode="NEXT1"),
+        {"type": "exhausted"},
+    ])
+    pause_event = threading.Event()
+    pause_event.set()
+    adapter = InstagramGalleryDlAdapter(
+        profile_path=Path("profile"),
+        client_factory=lambda *args, **kwargs: fake,
+        cookies={"sessionid": "fixture"},
+    )
+
+    def callback(_candidate):
+        pause_event.clear()
+        threading.Timer(0.12, pause_event.set).start()
+        return True
+
+    assert adapter.collect(
+        "https://www.instagram.com/alice/",
+        author_username="alice",
+        on_candidate=callback,
+        pause_event=pause_event,
+    ) == 2
+    assert fake.commands.index("pause") < fake.commands.index("resume") < fake.commands.index("next", 2)
+
+
+def test_worker_author_uses_posts_extractor_and_streams_candidate(monkeypatch, tmp_path: Path, capsys):
+    profile = tmp_path / "profile"
+    profile.mkdir()
+    find_urls = []
+    unicode_text = "作者 😂"
+
+    class Instance:
+        category = "instagram"
+        subcategory = "posts"
+        cookies_names = ("sessionid",)
+        cookies_domain = ".instagram.com"
+
+        def initialize(self):
+            return None
+
+        def cookies_check(self, *_args):
+            return True
+
+        def request(self, *_args, **_kwargs):
+            return SimpleNamespace(url="https://www.instagram.com/", status_code=200)
+
+        def items(self):
+            return iter([
+                (2, "", {
+                    "post_id": "post-author",
+                    "post_shortcode": "AUTHOR1",
+                    "post_url": "https://www.instagram.com/p/AUTHOR1/",
+                    "username": "alice",
+                    "description": unicode_text,
+                }),
+                (3, "https://cdn.example/author.jpg", {
+                    "num": 1,
+                    "shortcode": "AUTHOR1",
+                    "display_url": "https://cdn.example/author.jpg",
+                }),
+            ])
+
+    instance = Instance()
+    fake_gallery_dl = SimpleNamespace(
+        config=SimpleNamespace(set=lambda *_args, **_kwargs: None),
+        extractor=SimpleNamespace(
+            find=lambda url: find_urls.append(url) or instance,
+        ),
+    )
+    monkeypatch.setitem(sys.modules, "gallery_dl", fake_gallery_dl)
+    monkeypatch.setattr(gallerydl_worker.sys, "stdin", io.StringIO('{"type":"next"}\n{"type":"stop"}\n'))
+
+    assert gallerydl_worker.run({
+        "url": "https://www.instagram.com/alice/",
+        "profile_path": str(profile),
+        "cookies": {"sessionid": "fixture"},
+        "media_type": "mixed",
+        "gallery_dl_root": str(tmp_path),
+    }) == 0
+
+    output = [json.loads(line) for line in capsys.readouterr().out.splitlines()]
+    assert find_urls == ["https://www.instagram.com/alice/posts/"]
+    assert output[0] == {"type": "ready", "cookie_loaded": True}
+    assert output[1]["type"] == "candidate"
+    assert output[1]["media_identity"] == "AUTHOR1:0"
+    assert output[1]["description"] == unicode_text
 
 
 def test_cookie_store_is_dpapi_protected_and_round_trips(tmp_path: Path):
