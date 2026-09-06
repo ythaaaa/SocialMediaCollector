@@ -508,13 +508,17 @@ class DownloadEngine:
                 try:
                     self.on_log(f"{stage_label}=downloading_{source.kind}")
                     if source.kind == "hls":
-                        result = HLSDownloader(
+                        hls_downloader = HLSDownloader(
                             client,
                             {"Referer": referer, "User-Agent": "Mozilla/5.0"},
                             self.config.retry_count,
                             self.stop_event.is_set,
                             self._wait_if_paused,
-                        ).download(source.url, part_path)
+                        )
+                        result = hls_downloader.download(source.url, part_path)
+                        if platform == "pinterest":
+                            result = hls_downloader.validate_output(part_path, result)
+                            self.on_log(f"{stage_label}=integrity_pass")
                     elif source.kind == "dash":
                         result = DASHDownloader(
                             client,

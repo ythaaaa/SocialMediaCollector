@@ -919,3 +919,100 @@ def test_direct_video_request_preserves_signed_query_but_removes_range_controls(
     assert "_nc_sig=opaque" in request_url
     assert "bytestart" not in request_url
     assert "byteend" not in request_url
+
+
+def test_pinterest_corrupt_hls_output_is_failed_and_removed(tmp_path: Path, monkeypatch) -> None:
+    config = TaskConfig(
+        "",
+        1,
+        tmp_path / "output",
+        platform="pinterest",
+        source_identifier="https://www.pinterest.com/pin/1023443084094207470/",
+        collection_mode="single_post",
+        media_type="video",
+        interval_seconds=0,
+    )
+    engine = DownloadEngine(
+        config,
+        tmp_path / "profile",
+        database=CollectorDatabase(tmp_path / "collector.db"),
+    )
+    engine.task_dir = tmp_path / "task"
+    engine.task_dir.mkdir()
+    store = TaskStore(engine.task_dir, config)
+
+    class CorruptHLSDownloader:
+        def __init__(self, *_args, **_kwargs) -> None:
+            pass
+
+        def download(self, _url, output_path):
+            output_path.write_bytes(b"corrupt h264 and aac")
+            return SimpleNamespace(duration=2.0, width=720, height=1278, bitrate=1000)
+
+        def validate_output(self, _output_path, _expected):
+            raise HLSDownloadError("HLS 完整性验证失败：音视频 decode 失败。")
+
+    monkeypatch.setattr(engine_module, "HLSDownloader", CorruptHLSDownloader)
+    candidate = ImageCandidate(
+        "",
+        config.source_identifier,
+        platform="pinterest",
+        media_type="video",
+        media_url="https://v1.pinimg.com/videos/iht/hls/video.m3u8",
+    )
+
+    engine._download_one(object(), candidate, store, set())
+
+    assert engine.stats.downloaded == 0
+    assert engine.stats.failed == 1
+    assert not (engine.task_dir / "videos" / "0001.mp4").exists()
+    assert not (engine.task_dir / "videos" / ".0001.mp4.part.mp4").exists()
+
+
+def test_pinterest_corrupt_hls_does_not_count_target_and_next_candidate_can_succeed(tmp_path: Path, monkeypatch) -> None:
+    config = TaskConfig(
+        "fashion",
+        1,
+        tmp_path / "output",
+        platform="pinterest",
+        source_identifier="https://www.pinterest.com/search/pins/?q=fashion",
+        collection_mode="search",
+        media_type="video",
+        interval_seconds=0,
+    )
+    engine = DownloadEngine(
+        config,
+        tmp_path / "profile",
+        database=CollectorDatabase(tmp_path / "collector.db"),
+    )
+    engine.task_dir = tmp_path / "task"
+    engine.task_dir.mkdir()
+    store = TaskStore(engine.task_dir, config)
+    outcomes = iter(("corrupt", "valid"))
+
+    class SequenceHLSDownloader:
+        def __init__(self, *_args, **_kwargs) -> None:
+            self.outcome = next(outcomes)
+
+        def download(self, _url, output_path):
+            output_path.write_bytes(self.outcome.encode("ascii"))
+            return SimpleNamespace(duration=2.0, width=720, height=1278, bitrate=1000)
+
+        def validate_output(self, _output_path, expected):
+            if self.outcome == "corrupt":
+                raise HLSDownloadError("HLS 完整性验证失败：音视频 decode 失败。")
+            return expected
+
+    monkeypatch.setattr(engine_module, "HLSDownloader", SequenceHLSDownloader)
+    candidates = [
+        ImageCandidate("", "https://www.pinterest.com/pin/1/", platform="pinterest", media_type="video", media_url="https://cdn.test/1.m3u8"),
+        ImageCandidate("", "https://www.pinterest.com/pin/2/", platform="pinterest", media_type="video", media_url="https://cdn.test/2.m3u8"),
+    ]
+
+    for candidate in candidates:
+        engine._download_one(object(), candidate, store, set())
+
+    assert engine.stats.failed == 1
+    assert engine.stats.downloaded == 1
+    assert (engine.task_dir / "videos" / "0001.mp4").is_file()
+    assert not (engine.task_dir / "videos" / ".0001.mp4.part.mp4").exists()
