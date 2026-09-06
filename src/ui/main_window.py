@@ -195,6 +195,17 @@ class ChromeLoginWorker(QThread):
                 if not running:
                     break
                 time.sleep(0.5)
+            if self.platform == "pinterest" and not self.isInterruptionRequested():
+                from src.adapters.pinterest_cookie_bridge import PinterestAuthRequired, PinterestCookieBridge
+
+                try:
+                    bridge = PinterestCookieBridge(profile_path=self.browser_manager.profile_dir)
+                    bridge.sync()
+                    self.log.emit(f"Pinterest Cookie sync success; cookie count={bridge.cookie_count}")
+                except PinterestAuthRequired:
+                    self.log.emit("Pinterest Cookie sync skipped; login required")
+                except Exception as exc:
+                    raise RuntimeError(f"Pinterest Cookie sync failed: {type(exc).__name__}") from exc
         except BaseException as exc:
             _write_runtime_exception(
                 exc,
@@ -870,13 +881,14 @@ class MainWindow(QMainWindow):
                 self.keyword.setVisible(False)
             return
 
-        self.source_label.setText("搜索关键词")
+        single_pin = mode == "single_post"
+        self.source_label.setText("Pinterest Pin 链接" if single_pin else "搜索关键词")
         search = mode == "search"
         current_page = mode == "current_page"
-        self.source_label.setVisible(search)
-        self.keyword.setVisible(search)
-        self.keyword.setEnabled(search)
-        self.keyword.setPlaceholderText("输入 Pinterest 搜索关键词")
+        self.source_label.setVisible(search or single_pin)
+        self.keyword.setVisible(search or single_pin)
+        self.keyword.setEnabled(search or single_pin)
+        self.keyword.setPlaceholderText("https://www.pinterest.com/pin/.../" if single_pin else "输入 Pinterest 搜索关键词")
         if current_page:
             message = "当前页面模式\n请先打开 Pinterest 浏览器并进入目标页面，程序将从当前页面开始采集。"
             if self.browser_manager.is_running():
@@ -890,7 +902,8 @@ class MainWindow(QMainWindow):
             self.current_page_info.setVisible(True)
         else:
             self.mode_hint.setText(
-                "根据关键词打开 Pinterest 搜索结果并从顶部开始采集。" if search
+                "根据关键词通过 gallery-dl 发现 Pinterest 搜索结果，不打开采集浏览器。" if search
+                else "通过 gallery-dl 发现指定 Pinterest Pin 的图片或视频，不打开采集浏览器。" if single_pin
                 else "从 Pinterest 首页推荐流开始采集，不需要关键词。"
             )
         self.only_author.setVisible(False)
@@ -986,7 +999,7 @@ class MainWindow(QMainWindow):
             interval_seconds=self.interval.value(),
             collection_mode=mode,
             platform=platform,
-            source_identifier=hashtag if hashtag else source_text if platform in {"x", "instagram"} and mode in {"author", "search", "single_post"} else "",
+            source_identifier=hashtag if hashtag else source_text if (platform in {"x", "instagram"} and mode in {"author", "search", "single_post"}) or (platform == "pinterest" and mode == "single_post") else "",
             hashtag=hashtag,
             only_author_content=self.only_author.isChecked() if platform == "x" and mode == "author" else False,
             media_type=str(self.media_type.currentData()),

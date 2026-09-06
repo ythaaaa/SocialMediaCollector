@@ -8,6 +8,7 @@ from uuid import uuid4
 from src.utils.x import normalize_x_author
 from src.platforms import get_platform_spec
 from src.utils.instagram import normalize_hashtag
+from src.utils.pinterest import normalize_pinterest_pin_url
 
 
 TASK_STATUSES = frozenset({"pending", "running", "paused", "completed", "failed", "stopped", "interrupted"})
@@ -173,6 +174,8 @@ class TaskConfig:
                 raise ValueError("搜索关键词不能为空")
             if _looks_like_url(self.keyword):
                 raise ValueError("Pinterest 关键词搜索请输入搜索关键词，不要填写网页地址。")
+        if platform == "pinterest" and collection_mode == "single_post":
+            normalize_pinterest_pin_url(self.source_value)
         if platform == "x":
             if self.canonical_media_type() not in {"image", "video", "mixed"}:
                 raise ValueError("X 下载内容类型无效")

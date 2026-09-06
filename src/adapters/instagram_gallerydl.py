@@ -14,6 +14,7 @@ from src.browser.collector import ImageCandidate, PinterestVideoSource
 from src.browser.instagram_collector import media_identity
 from src.downloader.dash import parse_mpd, select_best_audio, select_best_video
 from src.adapters.instagram_cookie_bridge import InstagramAuthRequired, load_instagram_cookies
+from src.adapters.pinterest_cookie_bridge import PinterestAuthRequired, load_pinterest_cookies
 from src.utils.paths import profile_directory_for_platform
 from src.utils.instagram import normalize_hashtag
 from src.utils.runtime import runtime_root, subprocess_creation_flags
@@ -239,6 +240,8 @@ def _dash_sources(payload: dict[str, Any], width: int | None, height: int | None
 
 def candidate_from_gallerydl(payload: dict[str, Any]) -> ImageCandidate:
     """Map one safe, normalized helper payload to SMC's existing candidate type."""
+    if str(payload.get("platform") or "instagram").casefold() == "pinterest":
+        return _pinterest_candidate_from_gallerydl(payload)
     media_type = str(payload.get("media_type") or "image").lower()
     if media_type not in {"image", "video"}:
         raise GalleryDlError(f"unsupported Instagram media_type: {media_type}")
@@ -269,7 +272,7 @@ def candidate_from_gallerydl(payload: dict[str, Any]) -> ImageCandidate:
                 height=_int_or_none(source_data.get("height")) or height,
                 duration=_float_or_none(source_data.get("duration")) or duration,
                 bitrate=_int_or_none(source_data.get("bitrate")) or bitrate,
-                kind="dash",
+                kind=str(source_data.get("kind") or "dash"),
                 representation_id=str(source_data.get("representation_id") or ""),
                 codec=str(source_data.get("codec") or ""),
                 mime_type=str(source_data.get("mime_type") or ""),
@@ -325,6 +328,65 @@ def candidate_from_gallerydl(payload: dict[str, Any]) -> ImageCandidate:
     )
 
 
+def _pinterest_candidate_from_gallerydl(payload: dict[str, Any]) -> ImageCandidate:
+    media_type = str(payload.get("media_type") or "image").lower()
+    if media_type not in {"image", "video"}:
+        raise GalleryDlError(f"unsupported Pinterest media_type: {media_type}")
+    pin_id = str(payload.get("pin_id") or payload.get("post_id") or "")
+    index = _media_index(payload.get("media_index"))
+    post_url = str(payload.get("pin_url") or payload.get("post_url") or payload.get("url") or "")
+    source_url = str(payload.get("source_url") or post_url)
+    display_url = str(payload.get("display_url") or payload.get("thumbnail_url") or "")
+    media_url = str(payload.get("media_url") or payload.get("video_url") or display_url)
+    width = _int_or_none(payload.get("width"))
+    height = _int_or_none(payload.get("height"))
+    duration = _float_or_none(payload.get("duration"))
+    bitrate = _int_or_none(payload.get("bitrate"))
+    identity = str(payload.get("media_identity") or f"{pin_id}:{index}")
+    video_sources: list[PinterestVideoSource] = []
+    for source_data in payload.get("video_sources", ()):
+        if not isinstance(source_data, dict) or not source_data.get("url"):
+            continue
+        video_sources.append(
+            PinterestVideoSource(
+                url=str(source_data["url"]),
+                width=_int_or_none(source_data.get("width")) or width,
+                height=_int_or_none(source_data.get("height")) or height,
+                duration=_float_or_none(source_data.get("duration")) or duration,
+                bitrate=_int_or_none(source_data.get("bitrate")) or bitrate,
+                kind=str(source_data.get("kind") or ("hls" if ".m3u8" in str(source_data["url"]).casefold() else "mp4")),
+            )
+        )
+    fallback_urls = tuple(str(item) for item in payload.get("fallback_urls", ()) if item)
+    return ImageCandidate(
+        image_url=display_url if media_type == "image" else "",
+        pin_url=post_url,
+        source_page_url=source_url,
+        post_url=post_url,
+        platform="pinterest",
+        author_username=str(payload.get("username") or ""),
+        media_type=media_type,
+        media_url=media_url,
+        media_identity=identity,
+        duration=duration,
+        video_width=width if media_type == "video" else None,
+        video_height=height if media_type == "video" else None,
+        bitrate=bitrate,
+        post_id=pin_id,
+        post_text=str(payload.get("description") or payload.get("closeup_description") or payload.get("caption") or ""),
+        fallback_urls=fallback_urls,
+        video_sources=tuple(video_sources),
+        width=width,
+        height=height,
+        shortcode=pin_id,
+        caption=str(payload.get("caption") or payload.get("description") or ""),
+        media_index=index,
+        thumbnail_url=str(payload.get("thumbnail_url") or display_url),
+        metadata_source="gallery-dl",
+        source="gallery-dl",
+    )
+
+
 class _WorkerClient(Protocol):
     def start(self) -> None: ...
 
@@ -352,6 +414,7 @@ class GalleryDlWorkerClient:
         popen_factory: Callable[..., Any] = subprocess.Popen,
         cookies: dict[str, str] | None = None,
         source_hashtag: str = "",
+        platform: str = "instagram",
     ) -> None:
         self.url = url
         self.profile_path = Path(profile_path)
@@ -388,6 +451,7 @@ class GalleryDlWorkerClient:
         self.worker_script = Path(worker_script or Path(__file__).with_name("gallerydl_worker.py"))
         self.cookies = dict(cookies or {})
         self.source_hashtag = source_hashtag
+        self.platform = (platform or "instagram").strip().lower()
         self._popen_factory = popen_factory
         self._process: Any | None = None
         self._events: queue.Queue[dict[str, Any] | None] = queue.Queue()
@@ -453,6 +517,7 @@ class GalleryDlWorkerClient:
                 "gallery_dl_root": str(self.gallery_dl_root or ""),
                 "cookies": self.cookies,
                 "source_hashtag": self.source_hashtag,
+                "platform": self.platform,
             }
         )
 
@@ -583,6 +648,7 @@ class InstagramGalleryDlAdapter:
             worker_script=self.worker_script,
             cookies=self.cookies,
             source_hashtag=source_hashtag,
+            platform="instagram",
         )
 
     def collect(
@@ -683,6 +749,127 @@ class InstagramGalleryDlAdapter:
                 result = on_candidate(candidate)
                 if on_log and result is not False:
                     on_log("Instagram candidate accepted")
+                if result is False:
+                    break
+            return delivered
+        except GalleryDlStopped:
+            return delivered
+        finally:
+            client.stop()
+
+
+@dataclass
+class PinterestGalleryDlAdapter:
+    """Pinterest Search/Pin stream using the same isolated helper lifecycle."""
+
+    profile_path: Path | None = None
+    python_executable: Path | None = None
+    helper_executable: Path | None = None
+    gallery_dl_root: Path | None = None
+    worker_script: Path | None = None
+    cookies: dict[str, str] | None = None
+    client_factory: Callable[..., _WorkerClient] = GalleryDlWorkerClient
+
+    def profile(self) -> Path:
+        return Path(self.profile_path or profile_directory_for_platform("pinterest"))
+
+    @staticmethod
+    def _is_search_url(url: str) -> bool:
+        return "/search/pins/" in str(url or "").casefold()
+
+    def create_client(self, url: str, media_type: str = "mixed") -> _WorkerClient:
+        return self.client_factory(
+            url,
+            self.profile(),
+            media_type,
+            python_executable=self.python_executable,
+            helper_executable=self.helper_executable,
+            gallery_dl_root=self.gallery_dl_root,
+            worker_script=self.worker_script,
+            cookies=self.cookies or {},
+            platform="pinterest",
+        )
+
+    def collect(
+        self,
+        url: str,
+        *,
+        media_type: str = "mixed",
+        stop_event: threading.Event | None = None,
+        pause_event: threading.Event | None = None,
+        on_candidate: Callable[[ImageCandidate], bool | None],
+        on_discovered: Callable[[ImageCandidate], None] | None = None,
+        on_skipped: Callable[[ImageCandidate], None] | None = None,
+        on_log: Callable[[str], None] | None = None,
+    ) -> int:
+        stop_event = stop_event or threading.Event()
+        if pause_event is None:
+            pause_event = threading.Event()
+            pause_event.set()
+        requested_media_type = (media_type or "mixed").strip().lower()
+        is_search = self._is_search_url(url)
+        if is_search:
+            if self.cookies is None:
+                self.cookies = load_pinterest_cookies()
+            if not self.cookies:
+                raise PinterestAuthRequired("Pinterest Search requires login; 请先打开浏览器 / 登录并同步 Cookie。")
+        elif self.cookies is None:
+            # Single Pin remains usable for public/anonymous Pins.  It does
+            # not require the Pinterest Cookie Bridge.
+            self.cookies = {}
+        client = self.create_client(url, "mixed")
+        delivered = 0
+        pause_sent = False
+        try:
+            client.start()
+            ready = client.read_event(stop_event)
+            if ready.get("type") != "ready":
+                raise GalleryDlError(ready.get("message") or "gallery-dl helper did not become ready")
+            version = str(ready.get("gallery_dl_version") or "").strip()
+            engine = f"Pinterest engine=gallery-dl{(' ' + version) if version else ''}"
+            if bool(getattr(client, "is_packaged_helper", False)):
+                engine += "; helper=packaged"
+            if on_log:
+                on_log(f"{engine}; cookie loaded={'yes' if ready.get('cookie_loaded') else 'no'}")
+
+            while True:
+                if stop_event.is_set():
+                    raise GalleryDlStopped("gallery-dl helper stopped")
+                if not pause_event.is_set():
+                    if not pause_sent:
+                        client.send("pause")
+                        pause_sent = True
+                    time.sleep(0.05)
+                    continue
+                if pause_sent:
+                    client.send("resume")
+                    pause_sent = False
+                client.send("next")
+                event = client.read_event(stop_event)
+                event_type = event.get("type")
+                if event_type == "exhausted":
+                    break
+                if event_type == "error":
+                    if event.get("code") == "AUTH_REQUIRED":
+                        raise PinterestAuthRequired("Pinterest Search requires login; 请先打开浏览器 / 登录并同步 Cookie。")
+                    raise GalleryDlError(str(event.get("message") or "gallery-dl extraction failed"))
+                if event_type != "candidate":
+                    raise GalleryDlError(f"unexpected gallery-dl event: {event_type}")
+                candidate = candidate_from_gallerydl(event)
+                if on_discovered:
+                    on_discovered(candidate)
+                if requested_media_type != "mixed" and candidate.media_type != requested_media_type:
+                    if on_skipped:
+                        on_skipped(candidate)
+                    if on_log:
+                        on_log(f"Pinterest candidate skipped: media_type={candidate.media_type}")
+                    continue
+                delivered += 1
+                if on_log:
+                    on_log("Pinterest candidate discovered")
+                result = on_candidate(candidate)
+                if on_log and result is not False:
+                    on_log("Pinterest candidate accepted")
                 if result is False:
                     break
             return delivered

@@ -52,35 +52,22 @@ def test_download_count_means_successful_images_not_discovered_candidates(tmp_pa
         def get(self, url: str, **kwargs) -> Response:
             return Response(payloads[url])
 
-    class Collector:
-        def __init__(self, profile_dir, log) -> None:
-            return None
-
-        def open(self) -> None:
-            return None
-
-        def close(self) -> None:
-            return None
-
-        def collect(self, keyword, wanted, max_scrolls, should_stop, should_pause, on_found, on_candidate, should_finish):
+    class GalleryAdapter:
+        def collect(self, url, *, on_candidate, **_kwargs):
             candidates = [
                 ImageCandidate("small", "https://www.pinterest.com/pin/1", "https://www.pinterest.com/search/pins/?q=test"),
                 ImageCandidate("large-1", "https://www.pinterest.com/pin/2", "https://www.pinterest.com/search/pins/?q=test"),
                 ImageCandidate("large-2", "https://www.pinterest.com/pin/3", "https://www.pinterest.com/search/pins/?q=test"),
             ]
-            found = []
+            found = 0
             for candidate in candidates:
-                if should_stop():
-                    break
-                found.append(candidate)
-                on_candidate(candidate)
-                on_found(len(found))
-                if should_finish():
+                found += 1
+                if not on_candidate(candidate):
                     break
             return found
 
     monkeypatch.setattr(engine_module, "httpx", type("Httpx", (), {"Client": Client}))
-    monkeypatch.setattr(engine_module, "PinterestCollector", Collector)
+    monkeypatch.setattr(engine_module, "PinterestGalleryDlAdapter", GalleryAdapter)
     config = TaskConfig("test", 2, tmp_path, min_width=2, min_height=2, interval_seconds=0)
 
     task_dir = DownloadEngine(config, tmp_path / "profile", database=CollectorDatabase(tmp_path / "collector.db")).run()
@@ -243,7 +230,7 @@ def test_current_task_sha256_duplicate_is_skipped_when_history_dedup_is_off(tmp_
 
 def test_engine_reports_task_directory_as_soon_as_it_is_created(tmp_path: Path, monkeypatch) -> None:
     class Collector:
-        def __init__(self, profile_dir, log) -> None:
+        def __init__(self, *args, **kwargs) -> None:
             return None
 
         def open(self) -> None:
@@ -252,10 +239,10 @@ def test_engine_reports_task_directory_as_soon_as_it_is_created(tmp_path: Path, 
         def close(self) -> None:
             return None
 
-        def collect(self, keyword, wanted, max_scrolls, should_stop, should_pause, on_found, on_candidate, should_finish):
-            return []
+        def collect(self, _url, **_kwargs):
+            return 0
 
-    monkeypatch.setattr(engine_module, "PinterestCollector", Collector)
+    monkeypatch.setattr(engine_module, "PinterestGalleryDlAdapter", Collector)
     config = TaskConfig("test", 1, tmp_path, interval_seconds=0)
     started: list[Path] = []
 

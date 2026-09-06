@@ -21,7 +21,13 @@ from src.downloader.dash import DASHDownloadCancelled, DASHDownloadError, DASHDo
 from src.storage import CollectorDatabase, TaskStore
 from src.utils.paths import create_task_directory
 from src.utils.instagram import instagram_hashtag_url, normalize_hashtag
-from src.adapters.instagram_gallerydl import GalleryDlError, InstagramGalleryDlAdapter, instagram_legacy_enabled
+from src.adapters.instagram_gallerydl import (
+    GalleryDlError,
+    InstagramGalleryDlAdapter,
+    PinterestGalleryDlAdapter,
+    instagram_legacy_enabled,
+)
+from src.utils.pinterest import normalize_pinterest_pin_url, pinterest_pin_id, pinterest_search_url
 
 
 class DownloadEngine:
@@ -75,7 +81,10 @@ class DownloadEngine:
         self._current_task_hashes.clear()
         platform = self.config.canonical_platform()
         mode = self.config.canonical_collection_mode()
-        gallerydl_enabled = platform == "instagram" and mode in {"single_post", "author", "hashtag"} and not instagram_legacy_enabled()
+        gallerydl_enabled = (
+            (platform == "instagram" and mode in {"single_post", "author", "hashtag"} and not instagram_legacy_enabled())
+            or (platform == "pinterest" and mode in {"search", "single_post"})
+        )
         gallerydl_author_username = ""
         gallerydl_source_hashtag = ""
         if platform == "instagram" and mode == "hashtag" and not gallerydl_enabled:
@@ -111,6 +120,15 @@ class DownloadEngine:
             post_url = normalize_single_post_url(self.config.canonical_source_value)
             self.config = replace(self.config, source_identifier=post_url, source_page_url=post_url)
             task_name = f"instagram_{extract_shortcode(post_url) or post_url}"
+        elif platform == "pinterest" and mode == "search":
+            query = self.config.keyword.strip()
+            search_url = pinterest_search_url(query)
+            self.config = replace(self.config, source_page_url=search_url)
+            task_name = query
+        elif platform == "pinterest" and mode == "single_post":
+            pin_url = normalize_pinterest_pin_url(self.config.canonical_source_value)
+            self.config = replace(self.config, source_identifier=pin_url, source_page_url=pin_url)
+            task_name = f"pinterest_{pinterest_pin_id(pin_url) or pin_url.rsplit('/', 1)[-1]}"
         elif platform == "x" and mode == "author":
             username, _ = self.config.canonical_author()
             task_name = f"x_{username}"
@@ -135,13 +153,13 @@ class DownloadEngine:
             collector = InstagramCollector(self.profile_dir, self.on_log)
         elif platform == "x":
             collector = XCollector(self.profile_dir, self.on_log, self.task_output_dir)
-        else:
+        elif not gallerydl_enabled:
             collector = PinterestCollector(self.profile_dir, self.on_log)
         store: TaskStore | None = None
         try:
-            self._emit("正在打开浏览器并收集图片")
+            self._emit("正在准备采集并下载素材")
             if gallerydl_enabled:
-                self._emit("正在使用 gallery-dl 发现 Instagram 素材")
+                self._emit(f"正在使用 gallery-dl 发现 {platform.title()} 素材")
             elif self.browser_manager and self.browser_manager.is_running() and self.browser_manager.endpoint:
                 collector.connect_over_cdp(self.browser_manager.endpoint)
             else:
@@ -161,7 +179,7 @@ class DownloadEngine:
                         before = self.stats.downloaded
                         self._process_candidate(client, candidate, store, known)
                         if self.stats.downloaded > before:
-                            self.on_log("Instagram download success")
+                            self.on_log(f"{platform.title()} download success")
                         return not self.stop_event.is_set() and self.stats.downloaded < self.config.target_count
 
                     def on_gallerydl_discovered(_candidate: ImageCandidate) -> None:
@@ -172,17 +190,24 @@ class DownloadEngine:
                         self.stats.skipped += 1
                         self._emit()
 
-                    candidates = [None] * InstagramGalleryDlAdapter().collect(
-                        self.config.source_page_url if mode in {"author", "hashtag"} else self.config.canonical_source_value,
-                        media_type=self.config.canonical_media_type(),
-                        author_username=gallerydl_author_username or None,
-                        source_hashtag=gallerydl_source_hashtag or None,
-                        stop_event=self.stop_event,
-                        pause_event=self.pause_event,
-                        on_candidate=process_gallery_candidate,
-                        on_discovered=on_gallerydl_discovered,
-                        on_skipped=on_gallerydl_skipped,
-                        on_log=self.on_log,
+                    adapter = InstagramGalleryDlAdapter() if platform == "instagram" else PinterestGalleryDlAdapter()
+                    collect_kwargs = {
+                        "media_type": self.config.canonical_media_type(),
+                        "stop_event": self.stop_event,
+                        "pause_event": self.pause_event,
+                        "on_candidate": process_gallery_candidate,
+                        "on_discovered": on_gallerydl_discovered,
+                        "on_skipped": on_gallerydl_skipped,
+                        "on_log": self.on_log,
+                    }
+                    if platform == "instagram":
+                        collect_kwargs.update(
+                            author_username=gallerydl_author_username or None,
+                            source_hashtag=gallerydl_source_hashtag or None,
+                        )
+                    adapter.collect(
+                        self.config.source_page_url,
+                        **collect_kwargs,
                     )
                     if (
                         mode in {"author", "hashtag"}
