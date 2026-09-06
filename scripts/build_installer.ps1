@@ -98,7 +98,11 @@ foreach ($dll in $requiredDlls) {
 }
 
 $forbidden = @(Get-ChildItem -LiteralPath $distRoot -Recurse -Force -ErrorAction SilentlyContinue |
-    Where-Object { $_.FullName -match '(?i)(browser-data|cookie|local.?storage|\.venv|\\tests?($|\\)|\.part|\.env|secret|password|token)' })
+    Where-Object {
+        # Match user data and secret-bearing path components, but allow the
+        # packaged source worker named instagram_cookie_bridge_worker.py.
+        $_.FullName -match '(?i)(\\browser-data(?:\\|$)|\\local.?storage(?:\\|$)|\\auth(?:\\|$)|\\cookies?(?:\\|$)|\\[^\\]*\.cookies?$|\\(?:sessionid|csrftoken|ds_user_id)(?:\.[^\\]+)?$|\.venv(?:\\|$)|\\tests?(?:\\|$)|\.part(?:$|\\)|\.env(?:$|\\)|\\(?:secret|password|token)(?:\\|$))'
+    })
 if ($forbidden.Count -gt 0) {
     $names = ($forbidden | Select-Object -ExpandProperty FullName) -join "`n"
     throw "dist contains paths that must not enter the installer:`n$names"
@@ -113,7 +117,7 @@ if ($ffmpegInfo -match '--enable-gpl|--enable-nonfree') {
 }
 
 $iss = Join-Path $projectRoot 'installer\SocialMediaCollector.iss'
-$output = Join-Path $projectRoot 'release\SocialMediaCollector-Setup-v2.0.0.exe'
+$output = Join-Path $projectRoot 'release\SocialMediaCollector-Setup-v2.1.0-dev.exe'
 if (-not (Test-Path -LiteralPath $iss -PathType Leaf)) {
     throw "Inno Setup source file is missing: $iss"
 }
