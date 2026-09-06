@@ -573,6 +573,72 @@ def test_gallerydl_author_exhausted_before_target_is_failed(tmp_path: Path, monk
     assert history["error_message"] == "source exhausted before target reached"
 
 
+def test_gallerydl_extraction_error_finishes_task_as_failed(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.delenv("SMC_INSTAGRAM_LEGACY", raising=False)
+
+    class GalleryAdapter:
+        def collect(self, _url, **_kwargs):
+            raise GalleryDlError("gallery-dl extraction failed: AbortExtraction: HTTP redirect")
+
+    monkeypatch.setattr(engine_module, "InstagramGalleryDlAdapter", GalleryAdapter)
+    config = TaskConfig(
+        "",
+        1,
+        tmp_path / "output",
+        platform="instagram",
+        collection_mode="author",
+        source_identifier="happy_bboopa",
+        media_type="image",
+        interval_seconds=0,
+    )
+    engine = DownloadEngine(
+        config,
+        tmp_path / "profile",
+        database=CollectorDatabase(tmp_path / "collector.db"),
+    )
+
+    with pytest.raises(GalleryDlError, match="HTTP redirect"):
+        engine.run()
+
+    history = engine.database.get_history(config.task_id)
+    assert history["status"] == "failed"
+    assert "HTTP redirect" in history["error_message"]
+
+
+def test_stop_during_gallerydl_error_finishes_task_as_stopped(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.delenv("SMC_INSTAGRAM_LEGACY", raising=False)
+
+    holder: dict[str, DownloadEngine] = {}
+
+    class GalleryAdapter:
+        def collect(self, _url, **_kwargs):
+            holder["engine"].stop()
+            raise GalleryDlError("helper terminated while stopping")
+
+    monkeypatch.setattr(engine_module, "InstagramGalleryDlAdapter", GalleryAdapter)
+    config = TaskConfig(
+        "",
+        1,
+        tmp_path / "output",
+        platform="instagram",
+        collection_mode="hashtag",
+        source_identifier="aiart",
+        media_type="image",
+        interval_seconds=0,
+    )
+    engine = DownloadEngine(
+        config,
+        tmp_path / "profile",
+        database=CollectorDatabase(tmp_path / "collector.db"),
+    )
+    holder["engine"] = engine
+
+    task_dir = engine.run()
+
+    assert task_dir.exists()
+    assert engine.database.get_history(config.task_id)["status"] == "stopped"
+
+
 def test_gallerydl_hashtag_uses_tag_url_without_collection_chrome(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.delenv("SMC_INSTAGRAM_GALLERYDL_POC", raising=False)
     observed: dict[str, object] = {}

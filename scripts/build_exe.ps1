@@ -1,9 +1,18 @@
+param(
+    [string]$BuildRoot = '',
+    [string]$DistRoot = '',
+    [string]$GalleryDlHelperRelease = ''
+)
+
 $ErrorActionPreference = 'Stop'
 $projectRoot = Split-Path $PSScriptRoot -Parent
 Set-Location $projectRoot
 
-foreach ($directory in @('build', 'dist')) {
-    $target = Join-Path $projectRoot $directory
+if (-not $BuildRoot) { $BuildRoot = Join-Path $projectRoot 'build' }
+if (-not $DistRoot) { $DistRoot = Join-Path $projectRoot 'dist' }
+$BuildRoot = [IO.Path]::GetFullPath($BuildRoot)
+$DistRoot = [IO.Path]::GetFullPath($DistRoot)
+foreach ($target in @($BuildRoot, $DistRoot)) {
     if (Test-Path -LiteralPath $target) {
         Remove-Item -LiteralPath $target -Recurse -Force
     }
@@ -27,6 +36,15 @@ $runtimeDlls = @(Get-ChildItem -LiteralPath $vendorRuntime -Filter '*.dll' -File
 if ($runtimeDlls.Count -eq 0) {
     throw "缺少 FFmpeg shared runtime DLL：$vendorRuntime"
 }
+$helperRelease = $null
+if ($GalleryDlHelperRelease) {
+    $helperRelease = [IO.Path]::GetFullPath($GalleryDlHelperRelease)
+    $helperExe = Join-Path $helperRelease 'instagram-gallerydl-helper.exe'
+    $helperInternal = Join-Path $helperRelease '_internal'
+    if (-not (Test-Path -LiteralPath $helperExe -PathType Leaf) -or -not (Test-Path -LiteralPath $helperInternal -PathType Container)) {
+        throw "gallery-dl helper onedir 不完整：$helperRelease"
+    }
+}
 
 $pyInstallerArgs = @(
     '--noconfirm',
@@ -34,9 +52,9 @@ $pyInstallerArgs = @(
     '--windowed',
     '--name', 'SocialMediaCollector',
     '--paths', '.',
-    '--workpath', 'build',
-    '--distpath', 'dist',
-    '--specpath', 'build',
+    '--workpath', $BuildRoot,
+    '--distpath', $DistRoot,
+    '--specpath', $BuildRoot,
     '--add-data', "$uiResources;src\ui\resources",
     '--add-data', "$assets;assets",
     '--add-data', "$galleryDlWorker;src\adapters",
@@ -47,13 +65,16 @@ $pyInstallerArgs = @(
     '--version-file', (Join-Path $projectRoot 'installer\version_info.txt'),
     'app.py'
 )
+if ($helperRelease) {
+    $pyInstallerArgs += @('--add-data', "$helperRelease;helpers\instagram-gallerydl-helper")
+}
 foreach ($dll in $runtimeDlls) {
     $pyInstallerArgs += @('--add-binary', "$($dll.FullName);vendor\ffmpeg")
 }
 
 & $python -m PyInstaller @pyInstallerArgs
 
-$release = Join-Path $projectRoot 'dist\SocialMediaCollector'
+$release = Join-Path $DistRoot 'SocialMediaCollector'
 $exe = Join-Path $release 'SocialMediaCollector.exe'
 if (-not (Test-Path -LiteralPath $exe -PathType Leaf)) {
     throw "构建完成但未找到 EXE：$exe"
@@ -61,4 +82,10 @@ if (-not (Test-Path -LiteralPath $exe -PathType Leaf)) {
 # Qt6Core needs the Windows ICU build with its unsuffixed exports. PyInstaller
 # can otherwise pick an incompatible ICU from another runtime on PATH.
 Copy-Item -LiteralPath $systemIcu -Destination (Join-Path $release '_internal\icuuc.dll') -Force
+if ($helperRelease) {
+    $helperLicenseRoot = Join-Path (Split-Path $helperRelease -Parent) 'licenses'
+    if (Test-Path -LiteralPath $helperLicenseRoot -PathType Container) {
+        Copy-Item -LiteralPath $helperLicenseRoot -Destination (Join-Path $release 'licenses') -Recurse -Force
+    }
+}
 Write-Host "完成：$exe"

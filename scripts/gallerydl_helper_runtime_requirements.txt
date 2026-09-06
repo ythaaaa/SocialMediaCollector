@@ -1,0 +1,8 @@
+# Fixed runtime dependencies for the gallery-dl 1.32.10 helper spike.
+# yt-dlp is intentionally omitted: Instagram discovery returns URLs/DASH data,
+# while SocialMediaCollector owns the actual direct/DASH download pipeline.
+requests==2.34.2
+certifi==2026.7.22
+charset-normalizer==3.5.1
+idna==3.19
+urllib3==2.7.0

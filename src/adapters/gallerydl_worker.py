@@ -1,4 +1,4 @@
-"""Isolated JSONL worker for the opt-in Instagram gallery-dl adapter."""
+"""Isolated JSONL worker shared by external-Python and packaged helpers."""
 
 from __future__ import annotations
 
@@ -180,6 +180,7 @@ def run(start: dict[str, Any]) -> int:
     if root.is_dir() and str(root) not in sys.path:
         sys.path.insert(0, str(root))
     try:
+        import gallery_dl
         from gallery_dl import config, extractor
 
         config.set(("extractor", "instagram"), "cookies", {str(key): str(value) for key, value in cookies.items()})
@@ -196,7 +197,11 @@ def run(start: dict[str, Any]) -> int:
             return 2
         instance.initialize()
         cookie_loaded = bool(instance.cookies_check(instance.cookies_names, instance.cookies_domain, True))
-        _write({"type": "ready", "cookie_loaded": cookie_loaded})
+        ready = {"type": "ready", "cookie_loaded": cookie_loaded}
+        version = str(getattr(gallery_dl, "__version__", "") or "").strip()
+        if version:
+            ready["gallery_dl_version"] = version
+        _write(ready)
         if not cookie_loaded:
             _write({"type": "error", "code": "AUTH_REQUIRED", "message": "Instagram cookie loaded=no"})
             return 2

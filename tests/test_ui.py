@@ -282,6 +282,21 @@ def test_control_handlers_call_engine_and_follow_confirmed_states(window: MainWi
     assert not window.stop.isEnabled()
 
 
+def test_task_failed_releases_ui_before_reporting_error(window: MainWindow, monkeypatch) -> None:
+    errors: list[str] = []
+    monkeypatch.setattr(window, "_show_task_error", errors.append)
+    window._set_running(True)
+
+    window.task_failed("gallery-dl extraction failed: AbortExtraction")
+
+    assert errors == ["gallery-dl extraction failed: AbortExtraction"]
+    assert not window._task_active
+    assert window.status.text() == "任务失败"
+    assert window.start.isEnabled()
+    assert not window.pause.isEnabled()
+    assert not window.stop.isEnabled()
+
+
 def test_engine_control_methods_emit_confirmations(tmp_path: Path) -> None:
     engine = DownloadEngine(
         TaskConfig("keyword", 1, tmp_path / "output", interval_seconds=0),

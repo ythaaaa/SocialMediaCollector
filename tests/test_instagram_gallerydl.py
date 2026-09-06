@@ -17,10 +17,12 @@ from src.adapters.instagram_gallerydl import (
     InstagramGalleryDlAdapter,
     candidate_from_gallerydl,
     instagram_legacy_enabled,
+    resolve_packaged_gallerydl_helper,
     resolve_gallerydl_python,
 )
 from src.adapters.instagram_cookie_bridge import InstagramAuthRequired, load_instagram_cookies, save_instagram_cookies
 from src.adapters import gallerydl_worker
+from src.adapters import gallerydl_helper_entry
 
 
 def image_payload(**extra):
@@ -135,6 +137,31 @@ def test_adapter_user_log_uses_production_gallerydl_label():
     assert all("poc" not in message.casefold() for message in logs)
 
 
+def test_adapter_log_reports_packaged_helper_version_without_cookie_values():
+    class PackagedClient(FakeClient):
+        is_packaged_helper = True
+
+    secret = "fixture-sessionid-must-not-log"
+    fake = PackagedClient([
+        {"type": "ready", "cookie_loaded": True, "gallery_dl_version": "1.32.10"},
+        {"type": "exhausted"},
+    ])
+    logs: list[str] = []
+    adapter = InstagramGalleryDlAdapter(
+        profile_path=Path("profile"),
+        client_factory=lambda *args, **kwargs: fake,
+        cookies={"sessionid": secret},
+    )
+
+    assert adapter.collect(
+        "https://www.instagram.com/p/PACKAGED1/",
+        on_candidate=lambda _candidate: True,
+        on_log=logs.append,
+    ) == 0
+    assert "Instagram engine=gallery-dl 1.32.10; helper=packaged; cookie loaded=yes" in logs
+    assert all(secret not in message for message in logs)
+
+
 def test_gallerydl_default_keeps_cookie_auth_required_behavior(monkeypatch):
     monkeypatch.setattr(
         "src.adapters.instagram_gallerydl.load_instagram_cookies",
@@ -244,6 +271,51 @@ def test_gallerydl_missing_helper_has_clear_checked_paths(monkeypatch, tmp_path:
     assert str(tmp_path / "user" / "Desktop" / "gallery-dl" / ".venv" / "Scripts" / "python.exe") in message
 
 
+def _fake_packaged_helper(runtime_root: Path) -> Path:
+    helper = runtime_root / "helpers" / "instagram-gallerydl-helper" / "instagram-gallerydl-helper.exe"
+    helper.parent.mkdir(parents=True)
+    helper.write_bytes(b"fixture")
+    return helper
+
+
+def test_packaged_helper_resolver_finds_bundled_onedir_helper(tmp_path: Path):
+    helper = _fake_packaged_helper(tmp_path / "runtime")
+
+    assert resolve_packaged_gallerydl_helper(runtime_directory=tmp_path / "runtime") == helper
+
+
+def test_packaged_helper_is_selected_before_external_python_fallback(monkeypatch, tmp_path: Path):
+    helper = _fake_packaged_helper(tmp_path / "runtime")
+    monkeypatch.setattr(
+        "src.adapters.instagram_gallerydl.resolve_gallerydl_python",
+        lambda: pytest.fail("external Python fallback should not run"),
+    )
+
+    client = GalleryDlWorkerClient(
+        "https://www.instagram.com/p/PACKAGED1/",
+        tmp_path / "profile",
+        runtime_directory=tmp_path / "runtime",
+    )
+
+    assert client.is_packaged_helper
+    assert client.command == [str(helper)]
+
+
+def test_explicit_development_python_still_works_when_packaged_helper_is_absent(tmp_path: Path):
+    python = tmp_path / "developer-python.exe"
+    python.write_bytes(b"fixture")
+
+    client = GalleryDlWorkerClient(
+        "https://www.instagram.com/p/DEV1/",
+        tmp_path / "profile",
+        python_executable=python,
+        runtime_directory=tmp_path / "runtime-without-helper",
+    )
+
+    assert not client.is_packaged_helper
+    assert client.command[0] == str(python)
+
+
 def test_worker_jsonl_utf8_preserves_unicode_nested_metadata(monkeypatch):
     unicode_text = "测试 😂 📷 한국어 日本語"
     stdout = io.BytesIO()
@@ -275,6 +347,29 @@ def test_worker_jsonl_utf8_preserves_unicode_nested_metadata(monkeypatch):
     assert candidate.author_username == unicode_text
     assert candidate.caption == unicode_text
     assert candidate.post_text == unicode_text
+
+
+def test_worker_malformed_json_returns_jsonl_error_without_crashing(monkeypatch, capsys):
+    monkeypatch.setattr(gallerydl_worker.sys, "stdin", io.StringIO("not-json\n"))
+
+    assert gallerydl_worker.main() == 2
+
+    event = json.loads(capsys.readouterr().out)
+    assert event["type"] == "error"
+    assert "invalid start JSON" in event["message"]
+
+
+def test_helper_version_contains_fixed_gallerydl_provenance():
+    assert gallerydl_helper_entry.version_text().splitlines() == [
+        "instagram-gallerydl-helper",
+        "gallery-dl 1.32.10",
+        "gallery-dl commit 4f0abb2606e2c63423b13e8a072ec7fbaa79d036",
+    ]
+
+
+def test_helper_cli_version_writes_fixed_provenance(capsys):
+    assert gallerydl_helper_entry.main(["--version"]) == 0
+    assert capsys.readouterr().out.splitlines() == gallerydl_helper_entry.version_text().splitlines()
 
 
 def test_parent_reads_utf8_jsonl_and_preserves_unicode():
@@ -726,6 +821,31 @@ def test_adapter_converts_helper_error_to_local_error_and_cleans_up():
             "https://www.instagram.com/p/ABC123/",
             on_candidate=lambda _candidate: True,
         )
+    assert fake.stopped
+    assert fake.commands == ["start", "next"]
+
+
+def test_adapter_treats_helper_eof_as_terminal_and_cleans_up():
+    class CrashedClient(FakeClient):
+        def read_event(self, stop_event):
+            if self.events:
+                return self.events.pop(0)
+            raise GalleryDlError("gallery-dl helper exited unexpectedly (code=1)")
+
+    fake = CrashedClient([{"type": "ready", "cookie_loaded": True}])
+    adapter = InstagramGalleryDlAdapter(
+        profile_path=Path("profile"),
+        client_factory=lambda *args, **kwargs: fake,
+        cookies={"sessionid": "fixture"},
+    )
+
+    with pytest.raises(GalleryDlError, match="exited unexpectedly"):
+        adapter.collect(
+            "https://www.instagram.com/p/ABC123/",
+            on_candidate=lambda _candidate: True,
+        )
+
+    assert fake.commands == ["start", "next"]
     assert fake.stopped
 
 

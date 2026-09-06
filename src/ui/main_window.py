@@ -249,6 +249,7 @@ class MainWindow(QMainWindow):
         self.database = CollectorDatabase()
         self.queue_tasks: list[QueueTask] = []
         self.queue_runner: QueueRunner | None = None
+        self._task_error_box: QMessageBox | None = None
         self._control_state = "idle"
         self._task_active = False
 
@@ -1414,8 +1415,29 @@ class MainWindow(QMainWindow):
     def task_failed(self, message: str) -> None:
         self.append_log(f"任务异常：{message}")
         self._refresh_history()
-        QMessageBox.critical(self, "任务异常", message)
         self._set_running(False)
+        self.status.setText("任务失败")
+        self._show_task_error(message)
+
+    def _show_task_error(self, message: str) -> None:
+        """Report an async task error without blocking the recovered main UI."""
+        if self._task_error_box is not None:
+            self._task_error_box.close()
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Icon.Critical)
+        box.setWindowTitle("任务异常")
+        box.setText(message)
+        box.setStandardButtons(QMessageBox.StandardButton.Ok)
+        box.setWindowModality(Qt.WindowModality.NonModal)
+        box.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
+        self._task_error_box = box
+        box.finished.connect(lambda _result: self._clear_task_error_box(box))
+        box.show()
+        box.raise_()
+
+    def _clear_task_error_box(self, box: QMessageBox) -> None:
+        if self._task_error_box is box:
+            self._task_error_box = None
 
     def open_output(self) -> None:
         target = self.last_task_dir or Path(self.output.text())

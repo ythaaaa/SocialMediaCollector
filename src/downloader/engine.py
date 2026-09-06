@@ -248,9 +248,19 @@ class DownloadEngine:
             )
             self._emit(status)
         except Exception as exc:
+            stopped = self.stop_event.is_set()
             if store is not None:
-                store.complete(self.stats, self.stop_event.is_set(), str(exc))
-            self.database.finish_task(self.config, self.stats, "failed", str(exc), self.task_output_dir)
+                store.complete(self.stats, stopped, str(exc))
+            self.database.finish_task(
+                self.config,
+                self.stats,
+                "stopped" if stopped else "failed",
+                str(exc),
+                self.task_output_dir,
+            )
+            if stopped:
+                self._emit("已停止")
+                return self.task_dir
             raise
         finally:
             if collector is not None:

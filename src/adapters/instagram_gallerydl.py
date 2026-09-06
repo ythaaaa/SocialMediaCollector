@@ -16,13 +16,15 @@ from src.downloader.dash import parse_mpd, select_best_audio, select_best_video
 from src.adapters.instagram_cookie_bridge import InstagramAuthRequired, load_instagram_cookies
 from src.utils.paths import profile_directory_for_platform
 from src.utils.instagram import normalize_hashtag
-from src.utils.runtime import subprocess_creation_flags
+from src.utils.runtime import runtime_root, subprocess_creation_flags
 
 
 LEGACY_ENVIRONMENT_VARIABLE = "SMC_INSTAGRAM_LEGACY"
 GALLERYDL_PYTHON_ENVIRONMENT_VARIABLE = "SMC_GALLERYDL_PYTHON"
 GALLERYDL_HOME_ENVIRONMENT_VARIABLE = "SMC_GALLERYDL_HOME"
 DEFAULT_GALLERY_DL_ROOT = Path.home() / "Desktop" / "gallery-dl"
+PACKAGED_GALLERYDL_HELPER_DIRECTORY = Path("helpers") / "instagram-gallerydl-helper"
+PACKAGED_GALLERYDL_HELPER_EXECUTABLE = "instagram-gallerydl-helper.exe"
 
 
 class GalleryDlError(RuntimeError):
@@ -96,6 +98,16 @@ def _nearby_gallerydl_roots() -> tuple[Path, ...]:
 def _gallerydl_not_found(checked: list[Path]) -> GalleryDlError:
     paths = "\n".join(f"- {path}" for path in checked)
     return GalleryDlError(f"gallery-dl helper not found\nchecked candidate paths:\n{paths}")
+
+
+def resolve_packaged_gallerydl_helper(
+    *,
+    runtime_directory: Path | None = None,
+) -> Path | None:
+    """Return the onedir helper shipped with a packaged SMC build, if present."""
+    root = Path(runtime_root() if runtime_directory is None else runtime_directory)
+    helper = root / PACKAGED_GALLERYDL_HELPER_DIRECTORY / PACKAGED_GALLERYDL_HELPER_EXECUTABLE
+    return helper if helper.is_file() else None
 
 
 def resolve_gallerydl_python(
@@ -333,8 +345,10 @@ class GalleryDlWorkerClient:
         media_type: str = "mixed",
         *,
         python_executable: Path | None = None,
+        helper_executable: Path | None = None,
         gallery_dl_root: Path | None = None,
         worker_script: Path | None = None,
+        runtime_directory: Path | None = None,
         popen_factory: Callable[..., Any] = subprocess.Popen,
         cookies: dict[str, str] | None = None,
         source_hashtag: str = "",
@@ -342,20 +356,35 @@ class GalleryDlWorkerClient:
         self.url = url
         self.profile_path = Path(profile_path)
         self.media_type = media_type
-        if python_executable is None:
-            if gallery_dl_root is None:
-                self.python_executable = self._default_python()
+        self.helper_executable: Path | None = None
+        if helper_executable is not None:
+            packaged_helper = Path(helper_executable)
+            if not packaged_helper.is_file():
+                raise GalleryDlError(f"packaged gallery-dl helper not found: {packaged_helper}")
+            self.helper_executable = packaged_helper
+            self.python_executable: Path | None = None
+            self.gallery_dl_root: Path | None = None
+        elif python_executable is None and gallery_dl_root is None:
+            packaged_helper = resolve_packaged_gallerydl_helper(runtime_directory=runtime_directory)
+            if packaged_helper is not None:
+                self.helper_executable = packaged_helper
+                self.python_executable = None
+                self.gallery_dl_root = None
             else:
-                self.python_executable = _gallerydl_python_for_root(Path(gallery_dl_root))
-                if not self.python_executable.is_file():
-                    raise _gallerydl_not_found([self.python_executable])
+                self.python_executable = self._default_python()
+                self.gallery_dl_root = _gallerydl_root_from_python(self.python_executable)
+        elif python_executable is None:
+            self.python_executable = _gallerydl_python_for_root(Path(gallery_dl_root))
+            if not self.python_executable.is_file():
+                raise _gallerydl_not_found([self.python_executable])
+            self.gallery_dl_root = Path(gallery_dl_root)
         else:
             self.python_executable = Path(python_executable)
             if not self.python_executable.is_file():
                 raise _gallerydl_not_found([self.python_executable])
-        self.gallery_dl_root = Path(
-            gallery_dl_root or _gallerydl_root_from_python(self.python_executable)
-        )
+            self.gallery_dl_root = Path(
+                gallery_dl_root or _gallerydl_root_from_python(self.python_executable)
+            )
         self.worker_script = Path(worker_script or Path(__file__).with_name("gallerydl_worker.py"))
         self.cookies = dict(cookies or {})
         self.source_hashtag = source_hashtag
@@ -374,7 +403,15 @@ class GalleryDlWorkerClient:
 
     @property
     def command(self) -> list[str]:
+        if self.helper_executable is not None:
+            return [str(self.helper_executable)]
+        if self.python_executable is None:
+            raise GalleryDlError("gallery-dl helper command is unavailable")
         return [str(self.python_executable), str(self.worker_script)]
+
+    @property
+    def is_packaged_helper(self) -> bool:
+        return self.helper_executable is not None
 
     def start(self) -> None:
         if self._process is not None:
@@ -413,7 +450,7 @@ class GalleryDlWorkerClient:
                 "url": self.url,
                 "profile_path": str(self.profile_path),
                 "media_type": self.media_type,
-                "gallery_dl_root": str(self.gallery_dl_root),
+                "gallery_dl_root": str(self.gallery_dl_root or ""),
                 "cookies": self.cookies,
                 "source_hashtag": self.source_hashtag,
             }
@@ -526,6 +563,7 @@ class InstagramGalleryDlAdapter:
 
     profile_path: Path | None = None
     python_executable: Path | None = None
+    helper_executable: Path | None = None
     gallery_dl_root: Path | None = None
     worker_script: Path | None = None
     cookies: dict[str, str] | None = None
@@ -540,6 +578,7 @@ class InstagramGalleryDlAdapter:
             self.profile(),
             media_type,
             python_executable=self.python_executable,
+            helper_executable=self.helper_executable,
             gallery_dl_root=self.gallery_dl_root,
             worker_script=self.worker_script,
             cookies=self.cookies,
@@ -590,7 +629,11 @@ class InstagramGalleryDlAdapter:
                 raise GalleryDlError(ready.get("message") or "gallery-dl helper did not become ready")
             cookie_loaded = bool(ready.get("cookie_loaded"))
             if on_log:
-                on_log(f"Instagram engine=gallery-dl; cookie loaded={'yes' if cookie_loaded else 'no'}")
+                version = str(ready.get("gallery_dl_version") or "").strip()
+                engine = f"Instagram engine=gallery-dl{(' ' + version) if version else ''}"
+                if bool(getattr(client, "is_packaged_helper", False)):
+                    engine += "; helper=packaged"
+                on_log(f"{engine}; cookie loaded={'yes' if cookie_loaded else 'no'}")
             if not cookie_loaded:
                 raise GalleryDlError("Instagram cookie loaded=no; sessionid 未找到")
 
