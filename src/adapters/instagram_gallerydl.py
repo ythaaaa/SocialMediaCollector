@@ -17,6 +17,7 @@ from src.adapters.instagram_cookie_bridge import InstagramAuthRequired, load_ins
 from src.adapters.pinterest_cookie_bridge import PinterestAuthRequired, load_pinterest_cookies
 from src.utils.paths import profile_directory_for_platform
 from src.utils.instagram import normalize_hashtag
+from src.utils.pinterest import normalize_pinterest_board_url, normalize_pinterest_username
 from src.utils.runtime import runtime_root, subprocess_creation_flags
 
 
@@ -384,6 +385,11 @@ def _pinterest_candidate_from_gallerydl(payload: dict[str, Any]) -> ImageCandida
         thumbnail_url=str(payload.get("thumbnail_url") or display_url),
         metadata_source="gallery-dl",
         source="gallery-dl",
+        source_type=str(payload.get("source_type") or ""),
+        source_username=str(payload.get("source_username") or ""),
+        source_board=str(payload.get("source_board") or ""),
+        source_board_url=str(payload.get("source_board_url") or ""),
+        source_owner=str(payload.get("source_owner") or ""),
     )
 
 
@@ -415,6 +421,9 @@ class GalleryDlWorkerClient:
         cookies: dict[str, str] | None = None,
         source_hashtag: str = "",
         platform: str = "instagram",
+        source_type: str = "",
+        source_username: str = "",
+        source_board_url: str = "",
     ) -> None:
         self.url = url
         self.profile_path = Path(profile_path)
@@ -452,6 +461,9 @@ class GalleryDlWorkerClient:
         self.cookies = dict(cookies or {})
         self.source_hashtag = source_hashtag
         self.platform = (platform or "instagram").strip().lower()
+        self.source_type = str(source_type or "").strip().lower()
+        self.source_username = str(source_username or "").strip()
+        self.source_board_url = str(source_board_url or "").strip()
         self._popen_factory = popen_factory
         self._process: Any | None = None
         self._events: queue.Queue[dict[str, Any] | None] = queue.Queue()
@@ -518,6 +530,9 @@ class GalleryDlWorkerClient:
                 "cookies": self.cookies,
                 "source_hashtag": self.source_hashtag,
                 "platform": self.platform,
+                "source_type": self.source_type,
+                "source_username": self.source_username,
+                "source_board_url": self.source_board_url,
             }
         )
 
@@ -760,7 +775,7 @@ class InstagramGalleryDlAdapter:
 
 @dataclass
 class PinterestGalleryDlAdapter:
-    """Pinterest Search/Pin stream using the same isolated helper lifecycle."""
+    """Pinterest gallery-dl stream for Search, Pin, User/All Pins, and Board."""
 
     profile_path: Path | None = None
     python_executable: Path | None = None
@@ -777,7 +792,26 @@ class PinterestGalleryDlAdapter:
     def _is_search_url(url: str) -> bool:
         return "/search/pins/" in str(url or "").casefold()
 
-    def create_client(self, url: str, media_type: str = "mixed") -> _WorkerClient:
+    @staticmethod
+    def _source_type(url: str) -> str:
+        lowered = str(url or "").casefold().rstrip("/")
+        if "/search/pins" in lowered:
+            return "search"
+        if "/pin/" in lowered or "pin.it/" in lowered:
+            return "single_pin"
+        if lowered.endswith("/pins"):
+            return "user"
+        return "board"
+
+    def create_client(
+        self,
+        url: str,
+        media_type: str = "mixed",
+        *,
+        source_type: str = "",
+        source_username: str = "",
+        source_board_url: str = "",
+    ) -> _WorkerClient:
         return self.client_factory(
             url,
             self.profile(),
@@ -788,6 +822,9 @@ class PinterestGalleryDlAdapter:
             worker_script=self.worker_script,
             cookies=self.cookies or {},
             platform="pinterest",
+            source_type=source_type,
+            source_username=source_username,
+            source_board_url=source_board_url,
         )
 
     def collect(
@@ -801,23 +838,38 @@ class PinterestGalleryDlAdapter:
         on_discovered: Callable[[ImageCandidate], None] | None = None,
         on_skipped: Callable[[ImageCandidate], None] | None = None,
         on_log: Callable[[str], None] | None = None,
+        source_type: str = "",
+        source_username: str = "",
+        source_board_url: str = "",
     ) -> int:
         stop_event = stop_event or threading.Event()
         if pause_event is None:
             pause_event = threading.Event()
             pause_event.set()
         requested_media_type = (media_type or "mixed").strip().lower()
-        is_search = self._is_search_url(url)
-        if is_search:
+        source_type = (source_type or self._source_type(url)).strip().lower()
+        requires_cookie = source_type in {"search", "user", "board"}
+        if source_type == "user" and not source_username:
+            source_username = normalize_pinterest_username(url)
+        if source_type == "board" and not source_board_url:
+            source_board_url = normalize_pinterest_board_url(url)
+        if requires_cookie:
             if self.cookies is None:
                 self.cookies = load_pinterest_cookies()
             if not self.cookies:
-                raise PinterestAuthRequired("Pinterest Search requires login; 请先打开浏览器 / 登录并同步 Cookie。")
+                label = "Search" if source_type == "search" else "User/Board"
+                raise PinterestAuthRequired(f"Pinterest {label} requires login; 请先打开浏览器 / 登录并同步 Cookie。")
         elif self.cookies is None:
             # Single Pin remains usable for public/anonymous Pins.  It does
             # not require the Pinterest Cookie Bridge.
             self.cookies = {}
-        client = self.create_client(url, "mixed")
+        client = self.create_client(
+            url,
+            "mixed",
+            source_type=source_type,
+            source_username=source_username,
+            source_board_url=source_board_url,
+        )
         delivered = 0
         pause_sent = False
         try:
@@ -851,7 +903,8 @@ class PinterestGalleryDlAdapter:
                     break
                 if event_type == "error":
                     if event.get("code") == "AUTH_REQUIRED":
-                        raise PinterestAuthRequired("Pinterest Search requires login; 请先打开浏览器 / 登录并同步 Cookie。")
+                        label = "Search" if source_type == "search" else "User/Board"
+                        raise PinterestAuthRequired(f"Pinterest {label} requires login; 请先打开浏览器 / 登录并同步 Cookie。")
                     raise GalleryDlError(str(event.get("message") or "gallery-dl extraction failed"))
                 if event_type != "candidate":
                     raise GalleryDlError(f"unexpected gallery-dl event: {event_type}")

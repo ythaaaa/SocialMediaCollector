@@ -7,6 +7,7 @@ from uuid import uuid4
 from src.models import TASK_STATUSES, TaskConfig
 from src.utils.x import normalize_x_author
 from src.utils.instagram import normalize_hashtag
+from src.utils.pinterest import normalize_pinterest_board_url, normalize_pinterest_username
 
 
 class BatchInputError(ValueError):
@@ -59,8 +60,11 @@ def parse_batch_sources(platform: str, collection_mode: str, text: str) -> list[
     """Parse, trim, validate and de-duplicate one source per non-empty line."""
     platform = platform.strip().lower()
     collection_mode = collection_mode.strip().lower()
-    if (platform, collection_mode) not in {("pinterest", "search"), ("x", "author"), ("x", "search"), ("instagram", "hashtag")}:
-        raise ValueError("批量任务目前支持 Pinterest 关键词搜索、X 关键词搜索、X 作者主页和 Instagram Hashtag")
+    if (platform, collection_mode) not in {
+        ("pinterest", "search"), ("pinterest", "user"), ("pinterest", "board"),
+        ("x", "author"), ("x", "search"), ("instagram", "hashtag"),
+    }:
+        raise ValueError("批量任务目前支持 Pinterest 搜索、用户、画板、X 搜索/X 作者和 Instagram Hashtag")
 
     sources: list[str] = []
     seen: set[str] = set()
@@ -75,6 +79,10 @@ def parse_batch_sources(platform: str, collection_mode: str, text: str) -> list[
                 TaskConfig(value, 1, Path("."), platform="x", collection_mode="search").validate()
             elif platform == "instagram" and collection_mode == "hashtag":
                 value = normalize_hashtag(value)
+            elif platform == "pinterest" and collection_mode == "user":
+                value = normalize_pinterest_username(value)
+            elif platform == "pinterest" and collection_mode == "board":
+                value = normalize_pinterest_board_url(value)
             else:
                 TaskConfig(value, 1, Path("."), platform="pinterest", collection_mode="search").validate()
         except ValueError as exc:
@@ -97,8 +105,11 @@ def build_batch_configs(base_config: TaskConfig, text: str) -> list[TaskConfig]:
                 base_config,
                 task_id=uuid4().hex,
                 status="pending",
-                keyword=source if platform == "pinterest" else "",
+                keyword=source if platform == "pinterest" and mode == "search" else "",
                 source_identifier=source if platform == "x" and mode in {"author", "search"} else "",
+                username=source if platform == "pinterest" and mode == "user" else "",
+                board_url=source if platform == "pinterest" and mode == "board" else "",
+                source_type=mode if platform == "pinterest" else base_config.source_type,
                 hashtag=source if platform == "instagram" and mode == "hashtag" else "",
                 # Keep the user's selected directory as the immutable save root.
                 # The engine creates the per-task output directory at runtime.

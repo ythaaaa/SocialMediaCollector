@@ -35,6 +35,14 @@ PINTEREST_SHORT_URL_RE = re.compile(
     r"^https?://pin\.it/[^/?#]+/?(?:[?#].*)?$",
     re.IGNORECASE,
 )
+PINTEREST_USER_PINS_URL_RE = re.compile(
+    r"^https?://(?:www\.)?pinterest\.[^/]+/(?!pin/|search/)([^/?#]+)/pins/?(?:[?#].*)?$",
+    re.IGNORECASE,
+)
+PINTEREST_BOARD_URL_RE = re.compile(
+    r"^https?://(?:www\.)?pinterest\.[^/]+/(?!pin/|search/)([^/?#]+)/(?!(?:pins|_created)/?$)([^/?#]+)/?(?:[?#].*)?$",
+    re.IGNORECASE,
+)
 PINTEREST_AUTH_ERROR_MARKERS = (
     "401",
     "403",
@@ -136,9 +144,20 @@ def _candidate_payload(
     platform: str = "instagram",
     item_url: str = "",
     source_url: str = "",
+    source_type: str = "",
+    source_username: str = "",
+    source_board_url: str = "",
 ) -> dict[str, Any]:
     if platform.casefold() == "pinterest":
-        return _pinterest_candidate_payload(post, file_data, item_url=item_url, source_url=source_url)
+        return _pinterest_candidate_payload(
+            post,
+            file_data,
+            item_url=item_url,
+            source_url=source_url,
+            source_type=source_type,
+            source_username=source_username,
+            source_board_url=source_board_url,
+        )
     media_type = "video" if file_data.get("video_url") else "image"
     shortcode = str(post.get("post_shortcode") or file_data.get("shortcode") or "")
     try:
@@ -290,6 +309,9 @@ def _pinterest_candidate_payload(
     *,
     item_url: str = "",
     source_url: str = "",
+    source_type: str = "",
+    source_username: str = "",
+    source_board_url: str = "",
 ) -> dict[str, Any] | None:
     media_type = _pinterest_media_kind(post, file_data, item_url)
     extension = _pinterest_text(file_data.get("extension")).casefold()
@@ -315,9 +337,15 @@ def _pinterest_candidate_payload(
     else:
         username = _pinterest_text(author)
     description = _pinterest_text(post.get("description") or post.get("closeup_description") or post.get("title"))
+    board_data = post.get("board") if isinstance(post.get("board"), dict) else {}
     board = post.get("board") or post.get("board_name") or ""
     if isinstance(board, dict):
         board = board.get("name") or board.get("id") or ""
+    source_board = _pinterest_text(board)
+    owner_data = board_data.get("owner") if isinstance(board_data.get("owner"), dict) else {}
+    source_owner = _pinterest_text(owner_data.get("username") or owner_data.get("name"))
+    if source_type == "board" and not source_board_url:
+        source_board_url = source_url
     fallback_urls = _pinterest_fallback_urls(post, file_data, raw_media_url, media_type)
     video_sources: list[dict[str, Any]] = []
     if media_type == "video" and raw_media_url:
@@ -347,6 +375,11 @@ def _pinterest_candidate_payload(
         "pin_url": post_url,
         "source_url": source_url,
         "source_query": _pinterest_source_query(source_url),
+        "source_type": source_type,
+        "source_username": source_username,
+        "source_board": source_board,
+        "source_board_url": source_board_url,
+        "source_owner": source_owner,
         "username": username,
         "board": str(board),
         "description": description,
@@ -385,6 +418,11 @@ def _pinterest_candidate_payload(
         "metadata": metadata,
         "source_url": source_url,
         "source_query": _pinterest_source_query(source_url),
+        "source_type": source_type,
+        "source_username": source_username,
+        "source_board": source_board,
+        "source_board_url": source_board_url,
+        "source_owner": source_owner,
     }
 
 
@@ -395,6 +433,9 @@ def _matching_items(
     *,
     platform: str = "instagram",
     source_url: str = "",
+    source_type: str = "",
+    source_username: str = "",
+    source_board_url: str = "",
 ) -> Iterator[dict[str, Any]]:
     post: dict[str, Any] = {}
     for kind, _url, file_data in items:
@@ -410,6 +451,9 @@ def _matching_items(
             platform=platform,
             item_url=_url,
             source_url=source_url,
+            source_type=source_type,
+            source_username=source_username,
+            source_board_url=source_board_url,
         )
         if payload is not None and media_type in {"mixed", payload["media_type"]}:
             yield payload
@@ -435,18 +479,23 @@ def run(start: dict[str, Any]) -> int:
     profile_path = Path(str(start.get("profile_path") or ""))
     cookies = start.get("cookies")
     media_type = str(start.get("media_type") or "mixed").lower()
+    source_type = str(start.get("source_type") or "").strip().lower()
+    source_username = str(start.get("source_username") or "").strip()
+    source_board_url = str(start.get("source_board_url") or "").strip()
     is_post = bool(POST_URL_RE.match(url))
     is_author = bool(AUTHOR_URL_RE.match(url))
     is_tag = bool(TAG_URL_RE.match(url))
     is_pinterest_search = bool(PINTEREST_SEARCH_URL_RE.match(url))
     is_pinterest_pin = bool(PINTEREST_PIN_URL_RE.match(url) or PINTEREST_SHORT_URL_RE.match(url))
+    is_pinterest_user = bool(PINTEREST_USER_PINS_URL_RE.match(url))
+    is_pinterest_board = bool(PINTEREST_BOARD_URL_RE.match(url))
     is_pinterest = platform == "pinterest"
     if is_pinterest:
         is_post = is_pinterest_pin
-        is_author = False
+        is_author = is_pinterest_user
         is_tag = is_pinterest_search
-    if not is_post and not is_author and not is_tag:
-        supported = "Pinterest Search or Single Pin" if is_pinterest else "Instagram Author, Hashtag, or Single Post/Reel"
+    if not is_post and not is_author and not is_tag and not is_pinterest_board:
+        supported = "Pinterest Search, Single Pin, User, or Board" if is_pinterest else "Instagram Author, Hashtag, or Single Post/Reel"
         _write({"type": "error", "message": f"only {supported} URLs are supported"})
         return 2
     if media_type not in {"image", "video", "mixed"}:
@@ -474,6 +523,7 @@ def run(start: dict[str, Any]) -> int:
                 config.set(("extractor", "pinterest"), "cookies", {str(key): str(value) for key, value in cookies.items()})
             config.set(("extractor", "pinterest"), "videos", True)
             config.set(("extractor", "pinterest"), "audio", False)
+            config.set(("extractor", "pinterest"), "sections", False)
         else:
             config.set(("extractor", "instagram"), "cookies", {str(key): str(value) for key, value in cookies.items()})
             config.set(("extractor", "instagram"), "videos", True)
@@ -483,12 +533,17 @@ def run(start: dict[str, Any]) -> int:
             extractor_url = url.rstrip("/") + "/posts/"
         instance = extractor.find(extractor_url)
         if is_pinterest:
-            expected_subcategories = {"pin"} if is_post else {"search"}
+            if is_post:
+                expected_subcategories = {"pin", "pinit"}
+            elif is_author:
+                expected_subcategories = {"allpins"}
+            elif is_pinterest_board:
+                expected_subcategories = {"board"}
+            else:
+                expected_subcategories = {"search"}
             valid = instance is not None and instance.category == "pinterest" and instance.subcategory in expected_subcategories
-            if instance is not None and instance.subcategory == "pinit":
-                valid = True
             if not valid:
-                mode = "Single Pin" if is_post else "Search"
+                mode = "Single Pin" if is_post else ("User" if is_author else ("Board" if is_pinterest_board else "Search"))
                 _write({"type": "error", "message": f"gallery-dl did not resolve a Pinterest {mode} extractor"})
                 return 2
         else:
@@ -512,8 +567,10 @@ def run(start: dict[str, Any]) -> int:
         if not is_pinterest and not cookie_loaded:
             _write({"type": "error", "code": "AUTH_REQUIRED", "message": "Instagram cookie loaded=no"})
             return 2
-        if is_pinterest_search and not cookie_loaded:
-            _write({"type": "error", "code": "AUTH_REQUIRED", "message": "Pinterest Search requires login"})
+        pinterest_cookie_required = is_pinterest_search or is_pinterest_user or is_pinterest_board
+        if pinterest_cookie_required and not cookie_loaded:
+            auth_message = "Pinterest Search requires login" if is_pinterest_search else "Pinterest User/Board requires login"
+            _write({"type": "error", "code": "AUTH_REQUIRED", "message": auth_message})
             return 2
         if is_pinterest:
             # SMC owns media-type filtering so skipped videos/images still advance
@@ -523,6 +580,14 @@ def run(start: dict[str, Any]) -> int:
                 "mixed",
                 platform="pinterest",
                 source_url=url,
+                source_type=source_type or (
+                    "search" if is_pinterest_search else
+                    "user" if is_pinterest_user else
+                    "board" if is_pinterest_board else
+                    "single_pin"
+                ),
+                source_username=source_username,
+                source_board_url=source_board_url,
             )
         else:
             try:
@@ -548,7 +613,8 @@ def run(start: dict[str, Any]) -> int:
             candidates = _matching_items(iter(instance.items()), "mixed", str(start.get("source_hashtag") or ""))
     except Exception as exc:
         if is_pinterest and _is_pinterest_auth_error(exc):
-            _write({"type": "error", "code": "AUTH_REQUIRED", "message": "Pinterest Search requires login"})
+            auth_message = "Pinterest Search requires login" if is_pinterest_search else "Pinterest User/Board requires login"
+            _write({"type": "error", "code": "AUTH_REQUIRED", "message": auth_message})
             return 2
         _write({"type": "error", "message": f"gallery-dl initialization failed: {type(exc).__name__}: {exc}"})
         return 1
@@ -576,7 +642,8 @@ def run(start: dict[str, Any]) -> int:
             return 0
         except Exception as exc:
             if is_pinterest and _is_pinterest_auth_error(exc):
-                _write({"type": "error", "code": "AUTH_REQUIRED", "message": "Pinterest Search requires login"})
+                auth_message = "Pinterest Search requires login" if is_pinterest_search else "Pinterest User/Board requires login"
+                _write({"type": "error", "code": "AUTH_REQUIRED", "message": auth_message})
                 return 2
             _write({"type": "error", "message": f"gallery-dl extraction failed: {type(exc).__name__}: {exc}"})
             return 1

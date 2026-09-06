@@ -159,6 +159,33 @@ def test_search_passes_loaded_cookie_dict_and_never_logs_values():
     assert all(secret not in line for line in logs)
 
 
+@pytest.mark.parametrize(
+    ("mode_url", "expected_source_type"),
+    [
+        ("https://www.pinterest.com/alice/pins/", "user"),
+        ("https://www.pinterest.com/alice/ai-art/", "board"),
+    ],
+)
+def test_user_and_board_require_cookie_before_helper_start(monkeypatch, mode_url: str, expected_source_type: str):
+    monkeypatch.setattr(
+        gallerydl_adapter_module,
+        "load_pinterest_cookies",
+        lambda: (_ for _ in ()).throw(PinterestAuthRequired("Pinterest User/Board requires login")),
+    )
+    started = False
+
+    def client_factory(*_args, **_kwargs):
+        nonlocal started
+        started = True
+        return _FakeClient([])
+
+    adapter = PinterestGalleryDlAdapter(client_factory=client_factory)
+    with pytest.raises(PinterestAuthRequired, match="Pinterest User/Board requires login"):
+        adapter.collect(mode_url, on_candidate=lambda _candidate: True)
+    assert not started
+    assert adapter._source_type(mode_url) == expected_source_type
+
+
 def test_single_pin_stays_anonymous_when_cookie_store_is_missing():
     fake = _FakeClient([
         {"type": "ready", "cookie_loaded": False},

@@ -301,7 +301,7 @@ class MainWindow(QMainWindow):
         self.current_page_info.setVisible(False)
         self.batch_mode = QCheckBox("批量任务")
         self.batch_input = QTextEdit()
-        self.batch_input.setPlaceholderText("每行一个关键词或 X 作者，空行会忽略并自动去重")
+        self.batch_input.setPlaceholderText("每行一个关键词、Pinterest 用户/画板或 X 作者，空行会忽略并自动去重")
         self.batch_input.setMinimumHeight(92)
         self.batch_input.setMaximumHeight(130)
         self.batch_input.setVisible(False)
@@ -882,13 +882,26 @@ class MainWindow(QMainWindow):
             return
 
         single_pin = mode == "single_post"
-        self.source_label.setText("Pinterest Pin 链接" if single_pin else "搜索关键词")
+        user_mode = mode == "user"
+        board_mode = mode == "board"
+        self.source_label.setText(
+            "Pinterest Pin 链接" if single_pin
+            else "Pinterest 用户名 / 主页地址" if user_mode
+            else "Pinterest Board 链接" if board_mode
+            else "搜索关键词"
+        )
         search = mode == "search"
         current_page = mode == "current_page"
-        self.source_label.setVisible(search or single_pin)
-        self.keyword.setVisible(search or single_pin)
-        self.keyword.setEnabled(search or single_pin)
-        self.keyword.setPlaceholderText("https://www.pinterest.com/pin/.../" if single_pin else "输入 Pinterest 搜索关键词")
+        source_mode = search or single_pin or user_mode or board_mode
+        self.source_label.setVisible(source_mode)
+        self.keyword.setVisible(source_mode)
+        self.keyword.setEnabled(source_mode)
+        self.keyword.setPlaceholderText(
+            "https://www.pinterest.com/pin/.../" if single_pin
+            else "可粘贴用户名或 Pinterest 用户主页，软件会自动识别。" if user_mode
+            else "https://www.pinterest.com/username/board-name/" if board_mode
+            else "输入 Pinterest 搜索关键词"
+        )
         if current_page:
             message = "当前页面模式\n请先打开 Pinterest 浏览器并进入目标页面，程序将从当前页面开始采集。"
             if self.browser_manager.is_running():
@@ -904,6 +917,8 @@ class MainWindow(QMainWindow):
             self.mode_hint.setText(
                 "根据关键词通过 gallery-dl 发现 Pinterest 搜索结果，不打开采集浏览器。" if search
                 else "通过 gallery-dl 发现指定 Pinterest Pin 的图片或视频，不打开采集浏览器。" if single_pin
+                else "通过 gallery-dl 的 All Pins 提要采集该 Pinterest 用户的 Pins，不打开采集浏览器。" if user_mode
+                else "通过 gallery-dl 采集当前 Pinterest Board 的 Pins，不自动展开 Board Sections。" if board_mode
                 else "从 Pinterest 首页推荐流开始采集，不需要关键词。"
             )
         self.only_author.setVisible(False)
@@ -922,6 +937,8 @@ class MainWindow(QMainWindow):
         spec = get_platform_spec(str(self.platform.currentData() or ""))
         return bool(spec and spec.enabled and (self.platform.currentData(), self.mode.currentData()) in {
             ("pinterest", "search"),
+            ("pinterest", "user"),
+            ("pinterest", "board"),
             ("x", "author"),
             ("x", "search"),
             ("instagram", "hashtag"),
@@ -990,6 +1007,20 @@ class MainWindow(QMainWindow):
         source_text = self.keyword.text()
         is_search = mode == "search"
         hashtag = normalize_hashtag(source_text) if platform == "instagram" and mode == "hashtag" else ""
+        pinterest_user = source_text if platform == "pinterest" and mode == "user" else ""
+        pinterest_board = source_text if platform == "pinterest" and mode == "board" else ""
+        source_identifier = (
+            hashtag
+            if hashtag
+            else pinterest_user
+            if pinterest_user
+            else pinterest_board
+            if pinterest_board
+            else source_text
+            if (platform in {"x", "instagram"} and mode in {"author", "search", "single_post"})
+            or (platform == "pinterest" and mode == "single_post")
+            else ""
+        )
         return TaskConfig(
             keyword=source_text if is_search and platform == "pinterest" else "",
             target_count=self.count.value(),
@@ -999,7 +1030,10 @@ class MainWindow(QMainWindow):
             interval_seconds=self.interval.value(),
             collection_mode=mode,
             platform=platform,
-            source_identifier=hashtag if hashtag else source_text if (platform in {"x", "instagram"} and mode in {"author", "search", "single_post"}) or (platform == "pinterest" and mode == "single_post") else "",
+            source_identifier=source_identifier,
+            username=pinterest_user,
+            board_url=pinterest_board,
+            source_type=mode if platform == "pinterest" and mode in {"search", "single_post", "user", "board"} else "",
             hashtag=hashtag,
             only_author_content=self.only_author.isChecked() if platform == "x" and mode == "author" else False,
             media_type=str(self.media_type.currentData()),

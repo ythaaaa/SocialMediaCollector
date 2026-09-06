@@ -8,7 +8,7 @@ from uuid import uuid4
 from src.utils.x import normalize_x_author
 from src.platforms import get_platform_spec
 from src.utils.instagram import normalize_hashtag
-from src.utils.pinterest import normalize_pinterest_pin_url
+from src.utils.pinterest import normalize_pinterest_board_url, normalize_pinterest_pin_url, normalize_pinterest_username
 
 
 TASK_STATUSES = frozenset({"pending", "running", "paused", "completed", "failed", "stopped", "interrupted"})
@@ -55,6 +55,9 @@ class TaskConfig:
     collection_mode: str = ""
     platform: str = "pinterest"
     source_identifier: str = ""
+    username: str = ""
+    board_url: str = ""
+    source_type: str = ""
     hashtag: str = ""
     source_page_url: str = ""
     author_username: str = ""
@@ -89,7 +92,13 @@ class TaskConfig:
     @property
     def source_value(self) -> str:
         """Unified V2 source field while retaining legacy keyword/source fields."""
-        if self.canonical_collection_mode() == "hashtag":
+        platform = self.canonical_platform()
+        collection_mode = self.canonical_collection_mode()
+        if platform == "pinterest" and collection_mode == "user":
+            return self.username or self.source_identifier or self.keyword
+        if platform == "pinterest" and collection_mode == "board":
+            return self.board_url or self.source_identifier or self.keyword
+        if collection_mode == "hashtag":
             return self.hashtag or self.source_identifier or self.keyword
         return self.source_identifier or self.author_username or self.keyword
 
@@ -99,6 +108,10 @@ class TaskConfig:
             return self.canonical_author()[0]
         if self.canonical_platform() == "instagram" and self.canonical_collection_mode() == "hashtag":
             return normalize_hashtag(self.source_value)
+        if self.canonical_platform() == "pinterest" and self.canonical_collection_mode() == "user":
+            return normalize_pinterest_username(self.source_value)
+        if self.canonical_platform() == "pinterest" and self.canonical_collection_mode() == "board":
+            return normalize_pinterest_board_url(self.source_value)
         return self.source_value.strip()
 
     @property
@@ -149,6 +162,9 @@ class TaskConfig:
             collection_mode=collection_mode,
             platform=platform,
             source_identifier=source_identifier,
+            username=str(data.get("username") or (source_identifier if collection_mode == "user" else "")),
+            board_url=str(data.get("board_url") or (source_identifier if collection_mode == "board" else "")),
+            source_type=str(data.get("source_type") or (collection_mode if platform == "pinterest" else "")),
             hashtag=str(data.get("hashtag") or (source_identifier if collection_mode == "hashtag" else "")),
             source_page_url=str(data.get("source_page_url") or ""),
             author_username=str(data.get("author_username") or ""),
@@ -176,6 +192,10 @@ class TaskConfig:
                 raise ValueError("Pinterest 关键词搜索请输入搜索关键词，不要填写网页地址。")
         if platform == "pinterest" and collection_mode == "single_post":
             normalize_pinterest_pin_url(self.source_value)
+        if platform == "pinterest" and collection_mode == "user":
+            normalize_pinterest_username(self.source_value)
+        if platform == "pinterest" and collection_mode == "board":
+            normalize_pinterest_board_url(self.source_value)
         if platform == "x":
             if self.canonical_media_type() not in {"image", "video", "mixed"}:
                 raise ValueError("X 下载内容类型无效")
@@ -240,6 +260,11 @@ class DownloadRecord:
     source: str = ""
     hashtag: str = ""
     source_hashtag: str = ""
+    source_type: str = ""
+    source_username: str = ""
+    source_board: str = ""
+    source_board_url: str = ""
+    source_owner: str = ""
 
     def row(self) -> dict[str, Any]:
         return asdict(self)

@@ -47,6 +47,11 @@ class ImageCandidate:
     source: str = ""
     hashtag: str = ""
     source_hashtag: str = ""
+    source_type: str = ""
+    source_username: str = ""
+    source_board: str = ""
+    source_board_url: str = ""
+    source_owner: str = ""
 
 
 @dataclass(frozen=True)

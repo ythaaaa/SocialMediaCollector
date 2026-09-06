@@ -27,7 +27,15 @@ from src.adapters.instagram_gallerydl import (
     PinterestGalleryDlAdapter,
     instagram_legacy_enabled,
 )
-from src.utils.pinterest import normalize_pinterest_pin_url, pinterest_pin_id, pinterest_search_url
+from src.utils.pinterest import (
+    normalize_pinterest_board_url,
+    normalize_pinterest_pin_url,
+    normalize_pinterest_username,
+    pinterest_board_parts,
+    pinterest_pin_id,
+    pinterest_search_url,
+    pinterest_user_url,
+)
 
 
 class DownloadEngine:
@@ -83,10 +91,13 @@ class DownloadEngine:
         mode = self.config.canonical_collection_mode()
         gallerydl_enabled = (
             (platform == "instagram" and mode in {"single_post", "author", "hashtag"} and not instagram_legacy_enabled())
-            or (platform == "pinterest" and mode in {"search", "single_post"})
+            or (platform == "pinterest" and mode in {"search", "single_post", "user", "board"})
         )
         gallerydl_author_username = ""
         gallerydl_source_hashtag = ""
+        gallerydl_source_username = ""
+        gallerydl_source_board_url = ""
+        gallerydl_source_type = ""
         if platform == "instagram" and mode == "hashtag" and not gallerydl_enabled:
             raise RuntimeError("Instagram Hashtag 需要使用 gallery-dl；请取消设置 SMC_INSTAGRAM_LEGACY=1。")
         if platform == "instagram" and not gallerydl_enabled:
@@ -129,6 +140,32 @@ class DownloadEngine:
             pin_url = normalize_pinterest_pin_url(self.config.canonical_source_value)
             self.config = replace(self.config, source_identifier=pin_url, source_page_url=pin_url)
             task_name = f"pinterest_{pinterest_pin_id(pin_url) or pin_url.rsplit('/', 1)[-1]}"
+        elif platform == "pinterest" and mode == "user":
+            username = normalize_pinterest_username(self.config.canonical_source_value)
+            source_url = pinterest_user_url(username)
+            gallerydl_source_username = username
+            gallerydl_source_type = "user"
+            self.config = replace(
+                self.config,
+                source_identifier=username,
+                username=username,
+                source_type="user",
+                source_page_url=source_url,
+            )
+            task_name = f"pinterest_user_{username}"
+        elif platform == "pinterest" and mode == "board":
+            board_url = normalize_pinterest_board_url(self.config.canonical_source_value)
+            owner, board = pinterest_board_parts(board_url)
+            gallerydl_source_board_url = board_url
+            gallerydl_source_type = "board"
+            self.config = replace(
+                self.config,
+                source_identifier=board_url,
+                board_url=board_url,
+                source_type="board",
+                source_page_url=board_url,
+            )
+            task_name = f"pinterest_board_{owner}_{board}"
         elif platform == "x" and mode == "author":
             username, _ = self.config.canonical_author()
             task_name = f"x_{username}"
@@ -204,6 +241,12 @@ class DownloadEngine:
                         collect_kwargs.update(
                             author_username=gallerydl_author_username or None,
                             source_hashtag=gallerydl_source_hashtag or None,
+                        )
+                    elif platform == "pinterest":
+                        collect_kwargs.update(
+                            source_type=gallerydl_source_type or mode,
+                            source_username=gallerydl_source_username or None,
+                            source_board_url=gallerydl_source_board_url or None,
                         )
                     adapter.collect(
                         self.config.source_page_url,
@@ -409,6 +452,11 @@ class DownloadEngine:
             source=candidate.source,
             hashtag=candidate.hashtag or self.config.hashtag,
             source_hashtag=candidate.source_hashtag or self.config.hashtag,
+            source_type=candidate.source_type or self.config.source_type or self.config.canonical_collection_mode(),
+            source_username=candidate.source_username or self.config.username,
+            source_board=candidate.source_board,
+            source_board_url=candidate.source_board_url or self.config.board_url,
+            source_owner=candidate.source_owner,
         )
         try:
             if candidate.media_type == "video":

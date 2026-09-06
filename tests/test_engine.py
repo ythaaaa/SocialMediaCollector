@@ -302,6 +302,51 @@ def test_engine_reuses_managed_browser_and_records_current_page_url(tmp_path: Pa
     assert '"source_page_url": "https://www.pinterest.com/pin/123/"' in task_data
 
 
+@pytest.mark.parametrize(
+    ("mode", "source", "expected_url", "expected_type"),
+    [
+        ("user", "https://www.pinterest.com/alice/", "https://www.pinterest.com/alice/pins/", "user"),
+        ("board", "https://www.pinterest.com/alice/ai-art/", "https://www.pinterest.com/alice/ai-art/", "board"),
+    ],
+)
+def test_engine_routes_pinterest_user_and_board_to_gallerydl_without_browser(
+    tmp_path: Path, monkeypatch, mode: str, source: str, expected_url: str, expected_type: str,
+) -> None:
+    observed: dict[str, object] = {}
+
+    class GalleryAdapter:
+        def __init__(self, *args, **kwargs):
+            return None
+
+        def collect(self, url, **kwargs):
+            observed["url"] = url
+            observed.update(kwargs)
+            return 0
+
+    monkeypatch.setattr(engine_module, "PinterestGalleryDlAdapter", GalleryAdapter)
+    config = TaskConfig(
+        "",
+        1,
+        tmp_path,
+        platform="pinterest",
+        collection_mode=mode,
+        source_identifier=source,
+        username=source if mode == "user" else "",
+        board_url=source if mode == "board" else "",
+        interval_seconds=0,
+    )
+    task_dir = DownloadEngine(
+        config,
+        tmp_path / "profile",
+        database=CollectorDatabase(tmp_path / f"{mode}.db"),
+    ).run()
+
+    assert observed["url"] == expected_url
+    assert observed["source_type"] == expected_type
+    assert observed["on_candidate"]
+    assert not (task_dir / "task.json").exists() or expected_type in (task_dir / "task.json").read_text(encoding="utf-8")
+
+
 def test_engine_routes_instagram_to_shared_collector_and_normalizes_config(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setenv("SMC_INSTAGRAM_LEGACY", "1")
     observed: dict[str, object] = {}

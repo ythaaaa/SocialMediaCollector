@@ -74,7 +74,7 @@ def test_platform_registry_declares_current_and_reserved_capabilities() -> None:
     pinterest = get_platform_spec("pinterest")
     assert pinterest is not None
     assert pinterest.enabled is True
-    assert pinterest.collection_modes == ("search", "single_post", "home", "current_page")
+    assert pinterest.collection_modes == ("search", "single_post", "user", "board", "home", "current_page")
     assert pinterest.media_types == ("image", "video", "mixed")
 
     x = get_platform_spec("x")

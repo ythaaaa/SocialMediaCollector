@@ -17,7 +17,8 @@ class TaskStore:
         "only_author_content", "media_type", "media_url", "duration", "video_width",
         "video_height", "bitrate", "post_id", "post_text", "prompt_detected", "prompt",
         "posted_at", "collected_at", "shortcode", "caption", "media_index", "thumbnail_url",
-        "metadata_source", "source", "hashtag", "source_hashtag",
+        "metadata_source", "source", "hashtag", "source_hashtag", "source_type",
+        "source_username", "source_board", "source_board_url", "source_owner",
     ]
 
     def __init__(self, task_dir: Path, config: TaskConfig) -> None:
@@ -50,6 +51,12 @@ class TaskStore:
             data["source_page_url"] = profile_url
         elif config.canonical_platform() == "x":
             data["source_page_url"] = "https://x.com/home"
+        elif config.canonical_platform() == "pinterest":
+            data["source_type"] = config.source_type or config.canonical_collection_mode()
+            if config.canonical_collection_mode() == "user":
+                data["username"] = config.canonical_source_value
+            elif config.canonical_collection_mode() == "board":
+                data["board_url"] = config.canonical_source_value
         data["created_at"] = datetime.now().isoformat(timespec="seconds")
         (self.task_dir / "task.json").write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
 

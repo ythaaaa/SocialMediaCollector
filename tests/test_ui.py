@@ -195,6 +195,34 @@ def test_instagram_hashtag_form_normalizes_input_and_exposes_distinct_mode(windo
     assert config.canonical_source_value == "aiart"
 
 
+def test_pinterest_user_and_board_forms_keep_source_fields_and_legacy_modes(window: MainWindow) -> None:
+    assert [window.mode.itemData(i) for i in range(window.mode.count())] == [
+        "search", "single_post", "user", "board", "home", "current_page",
+    ]
+    window.mode.setCurrentIndex(2)
+    window.keyword.setText("https://www.pinterest.com/alice/")
+    user = window._task_config_from_form()
+    assert user.collection_mode == "user"
+    assert user.username.endswith("alice/")
+    assert user.canonical_source_value == "alice"
+    assert window.keyword.placeholderText() == "可粘贴用户名或 Pinterest 用户主页，软件会自动识别。"
+    assert "All Pins" in window.mode_hint.text()
+
+    window.mode.setCurrentIndex(3)
+    window.keyword.setText("https://www.pinterest.com/alice/ai-art/")
+    board = window._task_config_from_form()
+    assert board.collection_mode == "board"
+    assert board.board_url.endswith("/ai-art/")
+    assert board.canonical_source_value.endswith("/alice/ai-art/")
+    assert "Sections" in window.mode_hint.text()
+
+    window.mode.setCurrentIndex(4)
+    assert window.mode.currentData() == "home"
+    assert not window.keyword.isVisible()
+    window.mode.setCurrentIndex(5)
+    assert window.mode.currentData() == "current_page"
+
+
 def test_reserved_platform_cannot_start_task(window: MainWindow, monkeypatch: pytest.MonkeyPatch) -> None:
     messages: list[str] = []
     monkeypatch.setattr(

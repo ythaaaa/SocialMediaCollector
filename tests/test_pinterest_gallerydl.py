@@ -16,7 +16,14 @@ from src.adapters.instagram_gallerydl import (
 )
 from src.browser import ImageCandidate
 from src.models import TaskConfig
-from src.utils.pinterest import normalize_pinterest_pin_url, pinterest_pin_id, pinterest_search_url
+from src.utils.pinterest import (
+    normalize_pinterest_board_url,
+    normalize_pinterest_pin_url,
+    normalize_pinterest_username,
+    pinterest_pin_id,
+    pinterest_search_url,
+    pinterest_user_url,
+)
 
 
 def pinterest_post(**extra):
@@ -82,6 +89,52 @@ def test_pinterest_pin_validation_rejects_non_pin_urls():
         normalize_pinterest_pin_url("https://www.pinterest.com/search/pins/?q=cat")
 
 
+@pytest.mark.parametrize(
+    "value",
+    [
+        "alice",
+        "https://www.pinterest.com/alice/",
+        "https://www.pinterest.com/alice/pins/",
+        "https://www.pinterest.com/alice/_created/",
+        "https://www.pinterest.com/alice/_saved/",
+    ],
+)
+def test_pinterest_user_urls_normalize_to_all_pins_username(value: str):
+    assert normalize_pinterest_username(value) == "alice"
+
+
+def test_pinterest_user_and_board_urls_are_normalized_without_cross_mode_confusion():
+    assert normalize_pinterest_username("@alice") == "alice"
+    assert pinterest_user_url("alice") == "https://www.pinterest.com/alice/pins/"
+    assert normalize_pinterest_board_url("https://www.pinterest.com/alice/ai-art/") == (
+        "https://www.pinterest.com/alice/ai-art/"
+    )
+    for value in (
+        "https://www.pinterest.com/pin/123/",
+        "https://www.pinterest.com/search/pins/?q=cat",
+        "https://www.pinterest.com/alice/pins/",
+        "https://www.pinterest.com/alice/_created/",
+    ):
+        with pytest.raises(ValueError):
+            normalize_pinterest_board_url(value)
+    with pytest.raises(ValueError):
+        normalize_pinterest_username("https://www.pinterest.com/alice/boards/")
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "https://www.pinterest.com/alice/ai-art/",
+        "https://www.pinterest.com/pin/123/",
+        "https://www.pinterest.com/search/pins/?q=cat",
+        "https://example.com/alice/",
+    ],
+)
+def test_pinterest_user_rejects_board_pin_search_and_non_pinterest_urls(value: str):
+    with pytest.raises(ValueError):
+        normalize_pinterest_username(value)
+
+
 def test_pinterest_task_config_supports_search_and_single_pin():
     search = TaskConfig("AI art", 3, Path("out"), platform="pinterest", collection_mode="search")
     pin = TaskConfig(
@@ -97,10 +150,48 @@ def test_pinterest_task_config_supports_search_and_single_pin():
     pin.validate()
 
 
+def test_pinterest_task_config_supports_user_board_and_round_trip_fields():
+    user = TaskConfig(
+        "",
+        3,
+        Path("out"),
+        platform="pinterest",
+        collection_mode="user",
+        source_identifier="https://www.pinterest.com/alice/",
+        username="https://www.pinterest.com/alice/",
+        source_type="user",
+    )
+    board = TaskConfig(
+        "",
+        3,
+        Path("out"),
+        platform="pinterest",
+        collection_mode="board",
+        source_identifier="https://www.pinterest.com/alice/ai-art/",
+        board_url="https://www.pinterest.com/alice/ai-art/",
+        source_type="board",
+    )
+    user.validate()
+    board.validate()
+    assert user.canonical_source_value == "alice"
+    assert board.canonical_source_value.endswith("/alice/ai-art/")
+    loaded = TaskConfig.from_dict({
+        "platform": "pinterest",
+        "collection_mode": "board",
+        "source_identifier": "https://www.pinterest.com/alice/ai-art/",
+        "board_url": "https://www.pinterest.com/alice/ai-art/",
+        "target_count": 1,
+        "output_root": "out",
+    })
+    assert loaded.canonical_source_value.endswith("/alice/ai-art/")
+
+
 def test_pinterest_registry_keeps_home_and_current_page_modes():
     from src.platforms.registry import get_platform_spec
 
-    assert get_platform_spec("pinterest").collection_modes == ("search", "single_post", "home", "current_page")
+    assert get_platform_spec("pinterest").collection_modes == (
+        "search", "single_post", "user", "board", "home", "current_page"
+    )
 
 
 def test_pinterest_image_mapping_preserves_unicode_identity_and_metadata():
@@ -120,6 +211,34 @@ def test_pinterest_image_mapping_preserves_unicode_identity_and_metadata():
     assert candidate.caption == "测试描述 😂 📷 한국어 日本語"
     assert event["metadata"]["board"] == "AI art"
     assert event["metadata"]["source_url"].endswith("AI+art")
+
+
+def test_pinterest_user_and_board_candidate_metadata_preserves_source_scope():
+    user_event = gallerydl_worker._candidate_payload(
+        pinterest_post(),
+        {"num": 1, "extension": "jpg"},
+        platform="pinterest",
+        item_url="https://i.pinimg.com/originals/aa/bb/cc.jpg",
+        source_url="https://www.pinterest.com/alice/pins/",
+        source_type="user",
+        source_username="alice",
+    )
+    board_event = gallerydl_worker._candidate_payload(
+        pinterest_post(board={"name": "AI art", "owner": {"username": "alice"}}),
+        {"num": 1, "extension": "jpg"},
+        platform="pinterest",
+        item_url="https://i.pinimg.com/originals/aa/bb/cc.jpg",
+        source_url="https://www.pinterest.com/alice/ai-art/",
+        source_type="board",
+        source_board_url="https://www.pinterest.com/alice/ai-art/",
+    )
+    assert user_event is not None and board_event is not None
+    assert user_event["metadata"]["source_type"] == "user"
+    assert user_event["metadata"]["source_username"] == "alice"
+    assert board_event["metadata"]["source_type"] == "board"
+    assert board_event["metadata"]["source_board"] == "AI art"
+    assert board_event["metadata"]["source_owner"] == "alice"
+    assert candidate_from_gallerydl(board_event).source_board_url.endswith("/alice/ai-art/")
 
 
 def test_pinterest_carousel_uses_zero_based_media_identity():
@@ -324,6 +443,66 @@ def test_pinterest_worker_search_and_pin_extractors_are_selected_lazily(monkeypa
     assert captured == [{"initialized": True}, {"items": True}]
 
 
+@pytest.mark.parametrize(
+    ("url", "subcategory", "source_type"),
+    [
+        ("https://www.pinterest.com/alice/pins/", "allpins", "user"),
+        ("https://www.pinterest.com/alice/ai-art/", "board", "board"),
+    ],
+)
+def test_pinterest_worker_selects_user_or_board_without_queueing_sections(
+    monkeypatch, tmp_path: Path, url: str, subcategory: str, source_type: str,
+):
+    captured: list[dict] = []
+    settings: list[tuple] = []
+
+    class Instance:
+        category = "pinterest"
+        cookies_names = None
+        cookies_domain = ""
+
+        def __init__(self):
+            self.subcategory = subcategory
+
+        def initialize(self):
+            captured.append({"initialized": True})
+
+        def items(self):
+            captured.append({"items": True})
+            yield (2, "", pinterest_post(board={"name": "AI art", "owner": {"username": "alice"}}))
+            yield (3, "https://i.pinimg.com/originals/aa/bb/cc.jpg", {"num": 1, "extension": "jpg"})
+
+    instance = Instance()
+    fake_extractor = SimpleNamespace(find=lambda _url: instance)
+    fake_config = SimpleNamespace(set=lambda *args, **kwargs: settings.append(args))
+    fake_gallery = ModuleType("gallery_dl")
+    fake_gallery.__version__ = "1.32.10"
+    fake_gallery.config = fake_config
+    fake_gallery.extractor = fake_extractor
+    monkeypatch.setitem(sys.modules, "gallery_dl", fake_gallery)
+    monkeypatch.setitem(sys.modules, "gallery_dl.config", fake_config)
+    monkeypatch.setitem(sys.modules, "gallery_dl.extractor", fake_extractor)
+    monkeypatch.setattr(gallerydl_worker.sys, "stdin", io.StringIO('{"type":"next"}\n{"type":"stop"}\n'))
+    output: list[dict] = []
+    monkeypatch.setattr(gallerydl_worker, "_write", output.append)
+
+    assert gallerydl_worker.run({
+        "platform": "pinterest",
+        "url": url,
+        "profile_path": str(tmp_path / "unused"),
+        "cookies": {"_pinterest_sess": "test-session"},
+        "media_type": "mixed",
+        "source_type": source_type,
+        "source_username": "alice",
+        "source_board_url": "https://www.pinterest.com/alice/ai-art/",
+    }) == 0
+    assert output[0]["type"] == "ready"
+    assert output[1]["source_type"] == source_type
+    assert output[1]["source_username"] == "alice"
+    assert any(item == (("extractor", "pinterest"), "sections", False) for item in settings)
+    assert captured == [{"initialized": True}, {"items": True}]
+
+
 def test_pinterest_worker_rejects_instagram_only_url_without_loading_browser():
     output: list[dict] = []
     monkeypatch = pytest.MonkeyPatch()
@@ -337,4 +516,4 @@ def test_pinterest_worker_rejects_instagram_only_url_without_loading_browser():
         }) == 2
     finally:
         monkeypatch.undo()
-    assert "Pinterest Search or Single Pin" in output[0]["message"]
+    assert "Pinterest Search, Single Pin, User, or Board" in output[0]["message"]

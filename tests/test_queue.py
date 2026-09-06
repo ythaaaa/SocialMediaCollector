@@ -94,6 +94,24 @@ def test_instagram_hashtag_batch_normalizes_and_preserves_policy() -> None:
     assert all(config.skip_history_duplicates for config in configs)
 
 
+def test_pinterest_user_and_board_batch_preserve_queue_source_fields() -> None:
+    users = build_batch_configs(
+        _base_config("pinterest", "user"),
+        "alice\nhttps://www.pinterest.com/bob/\nalice",
+    )
+    boards = build_batch_configs(
+        _base_config("pinterest", "board"),
+        "https://www.pinterest.com/alice/ai-art/\nhttps://www.pinterest.com/bob/fashion/",
+    )
+    assert [config.username for config in users] == ["alice", "bob"]
+    assert all(config.source_type == "user" for config in users)
+    assert [config.canonical_source_value for config in boards] == [
+        "https://www.pinterest.com/alice/ai-art/",
+        "https://www.pinterest.com/bob/fashion/",
+    ]
+    assert all(config.source_type == "board" for config in boards)
+
+
 def test_queue_tasks_create_sibling_directories_under_one_save_root(tmp_path: Path) -> None:
     configs = build_batch_configs(
         TaskConfig("", 5, tmp_path, platform="pinterest", collection_mode="search", interval_seconds=0),
