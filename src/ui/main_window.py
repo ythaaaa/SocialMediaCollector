@@ -206,6 +206,21 @@ class ChromeLoginWorker(QThread):
                     self.log.emit("Pinterest Cookie sync skipped; login required")
                 except Exception as exc:
                     raise RuntimeError(f"Pinterest Cookie sync failed: {type(exc).__name__}") from exc
+            if self.platform == "x" and not self.isInterruptionRequested():
+                from src.adapters.x_cookie_bridge import XAuthRequired, XCookieBridge
+
+                try:
+                    bridge = XCookieBridge(profile_path=self.browser_manager.profile_dir)
+                    bridge.sync()
+                    self.log.emit(
+                        f"X Cookie sync success; cookie count={bridge.cookie_count}; "
+                        f"auth_token present={'yes' if bridge.auth_token_present else 'no'}; "
+                        f"ct0 present={'yes' if bridge.ct0_present else 'no'}"
+                    )
+                except XAuthRequired:
+                    self.log.emit("X Cookie sync skipped; AUTH_REQUIRED")
+                except Exception as exc:
+                    raise RuntimeError(f"X Cookie sync failed: {type(exc).__name__}") from exc
         except BaseException as exc:
             _write_runtime_exception(
                 exc,

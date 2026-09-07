@@ -25,7 +25,7 @@ def test_platform_profile_routing_keeps_pinterest_x_and_instagram_separate(monke
     from src.utils.paths import profile_directory_for_platform
 
     assert profile_directory_for_platform("pinterest") == tmp_path / "PinterestLocalDownloader" / "browser-data"
-    assert profile_directory_for_platform("x") == tmp_path / "PinterestLocalDownloader" / "browser-data"
+    assert profile_directory_for_platform("x") == tmp_path / "PinterestLocalDownloader" / "browser-data-x"
     instagram = profile_directory_for_platform("instagram")
     assert instagram == tmp_path / "PinterestLocalDownloader" / "browser-data-instagram"
     assert not instagram.exists()

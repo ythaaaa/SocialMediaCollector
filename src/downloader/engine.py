@@ -25,6 +25,7 @@ from src.adapters.instagram_gallerydl import (
     GalleryDlError,
     InstagramGalleryDlAdapter,
     PinterestGalleryDlAdapter,
+    XGalleryDlAdapter,
     instagram_legacy_enabled,
 )
 from src.utils.pinterest import (
@@ -36,6 +37,7 @@ from src.utils.pinterest import (
     pinterest_search_url,
     pinterest_user_url,
 )
+from src.utils.x import x_author_media_url, x_search_url
 
 
 class DownloadEngine:
@@ -92,6 +94,7 @@ class DownloadEngine:
         gallerydl_enabled = (
             (platform == "instagram" and mode in {"single_post", "author", "hashtag"} and not instagram_legacy_enabled())
             or (platform == "pinterest" and mode in {"search", "single_post", "user", "board"})
+            or (platform == "x" and mode in {"author", "search"})
         )
         gallerydl_author_username = ""
         gallerydl_source_hashtag = ""
@@ -167,10 +170,20 @@ class DownloadEngine:
             )
             task_name = f"pinterest_board_{owner}_{board}"
         elif platform == "x" and mode == "author":
-            username, _ = self.config.canonical_author()
+            username, source_url = x_author_media_url(self.config.canonical_source_value)
+            gallerydl_source_username = username
+            gallerydl_source_type = "author"
+            self.config = replace(
+                self.config, source_identifier=username, author_username=username,
+                source_page_url=source_url,
+            )
             task_name = f"x_{username}"
         elif platform == "x" and mode == "search":
-            task_name = f"x_{self.config.canonical_source_value}"
+            raw_query = self.config.canonical_source_value
+            query, source_url = x_search_url(raw_query, self.config.canonical_media_type())
+            gallerydl_source_type = "search"
+            self.config = replace(self.config, source_page_url=source_url)
+            task_name = f"x_{raw_query}"
         elif platform == "x":
             task_name = "x_首页推荐流"
         else:
@@ -188,7 +201,7 @@ class DownloadEngine:
         collector = None
         if platform == "instagram" and not gallerydl_enabled:
             collector = InstagramCollector(self.profile_dir, self.on_log)
-        elif platform == "x":
+        elif platform == "x" and not gallerydl_enabled:
             collector = XCollector(self.profile_dir, self.on_log, self.task_output_dir)
         elif not gallerydl_enabled:
             collector = PinterestCollector(self.profile_dir, self.on_log)
@@ -227,7 +240,11 @@ class DownloadEngine:
                         self.stats.skipped += 1
                         self._emit()
 
-                    adapter = InstagramGalleryDlAdapter() if platform == "instagram" else PinterestGalleryDlAdapter()
+                    adapter = (
+                        InstagramGalleryDlAdapter() if platform == "instagram" else
+                        PinterestGalleryDlAdapter() if platform == "pinterest" else
+                        XGalleryDlAdapter()
+                    )
                     collect_kwargs = {
                         "media_type": self.config.canonical_media_type(),
                         "stop_event": self.stop_event,
@@ -247,6 +264,13 @@ class DownloadEngine:
                             source_type=gallerydl_source_type or mode,
                             source_username=gallerydl_source_username or None,
                             source_board_url=gallerydl_source_board_url or None,
+                        )
+                    elif platform == "x":
+                        collect_kwargs.update(
+                            source_type=gallerydl_source_type or mode,
+                            source_username=gallerydl_source_username or None,
+                            search_scope=self.config.canonical_search_scope(),
+                            only_prompt_posts=self.config.only_prompt_posts,
                         )
                     adapter.collect(
                         self.config.source_page_url,

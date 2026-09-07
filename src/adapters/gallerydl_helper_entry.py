@@ -1,4 +1,4 @@
-"""Console entry point for the frozen Instagram gallery-dl JSONL helper."""
+"""Console entry point for the shared frozen gallery-dl JSONL helper."""
 
 from __future__ import annotations
 
@@ -31,12 +31,15 @@ def _self_test_payload() -> dict[str, Any]:
         "reel": "https://www.instagram.com/reel/REEL123/",
         "posts": "https://www.instagram.com/example/posts/",
         "tag": "https://www.instagram.com/explore/tags/aiart/",
+        "twitter-media": "https://x.com/example/media",
+        "twitter-search": "https://x.com/search?q=aiart",
     }
     resolved: dict[str, str] = {}
     for name, url in urls.items():
         instance = extractor.find(url)
-        if instance is None or instance.category != "instagram":
-            raise RuntimeError(f"Instagram {name} extractor unavailable")
+        expected_category = "twitter" if name.startswith("twitter-") else "instagram"
+        if instance is None or instance.category != expected_category:
+            raise RuntimeError(f"{name} extractor unavailable")
         resolved[name] = str(instance.subcategory)
     return {
         "type": "self_test",

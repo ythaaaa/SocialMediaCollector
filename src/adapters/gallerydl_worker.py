@@ -43,6 +43,14 @@ PINTEREST_BOARD_URL_RE = re.compile(
     r"^https?://(?:www\.)?pinterest\.[^/]+/(?!pin/|search/)([^/?#]+)/(?!(?:pins|_created)/?$)([^/?#]+)/?(?:[?#].*)?$",
     re.IGNORECASE,
 )
+X_MEDIA_URL_RE = re.compile(
+    r"^https?://(?:www\.)?(?:x\.com|twitter\.com)/([A-Za-z0-9_]{1,15})/media/?(?:[?#].*)?$",
+    re.IGNORECASE,
+)
+X_SEARCH_URL_RE = re.compile(
+    r"^https?://(?:www\.)?(?:x\.com|twitter\.com)/search/?\?(?:[^#]*&)?q=[^#]+",
+    re.IGNORECASE,
+)
 PINTEREST_AUTH_ERROR_MARKERS = (
     "401",
     "403",
@@ -66,6 +74,16 @@ def _is_pinterest_auth_error(exc: BaseException) -> bool:
             parts.append(str(value))
     text = " ".join(parts).casefold()
     return any(marker in text for marker in PINTEREST_AUTH_ERROR_MARKERS)
+
+
+def _is_x_auth_error(exc: BaseException) -> bool:
+    parts = [str(exc), type(exc).__name__]
+    for attribute in ("status_code", "status", "url"):
+        value = getattr(exc, attribute, None)
+        if value is not None:
+            parts.append(str(value))
+    text = " ".join(parts).casefold()
+    return any(marker in text for marker in PINTEREST_AUTH_ERROR_MARKERS + ("authorizationerror", "authrequired"))
 
 
 def _configure_stdio_utf8() -> None:
@@ -148,7 +166,8 @@ def _candidate_payload(
     source_username: str = "",
     source_board_url: str = "",
 ) -> dict[str, Any]:
-    if platform.casefold() == "pinterest":
+    canonical_platform = platform.casefold()
+    if canonical_platform == "pinterest":
         return _pinterest_candidate_payload(
             post,
             file_data,
@@ -157,6 +176,15 @@ def _candidate_payload(
             source_type=source_type,
             source_username=source_username,
             source_board_url=source_board_url,
+        )
+    if canonical_platform in {"x", "twitter"}:
+        return _x_candidate_payload(
+            post,
+            file_data,
+            item_url=item_url,
+            source_url=source_url,
+            source_type=source_type,
+            source_username=source_username,
         )
     media_type = "video" if file_data.get("video_url") else "image"
     shortcode = str(post.get("post_shortcode") or file_data.get("shortcode") or "")
@@ -426,6 +454,107 @@ def _pinterest_candidate_payload(
     }
 
 
+def _x_candidate_payload(
+    post: dict[str, Any],
+    file_data: dict[str, Any],
+    *,
+    item_url: str = "",
+    source_url: str = "",
+    source_type: str = "",
+    source_username: str = "",
+) -> dict[str, Any] | None:
+    url = str(item_url or file_data.get("url") or "").strip()
+    if not url or url.startswith("ytdl:"):
+        return None
+    extension = str(file_data.get("extension") or "").casefold()
+    raw_type = str(file_data.get("type") or "").casefold()
+    media_type = "video" if raw_type in {"video", "animated_gif", "gif"} or extension in {"mp4", "m3u8", "webm", "mov"} or ".m3u8" in url.casefold() else "image"
+    tweet_id = str(file_data.get("tweet_id") or post.get("tweet_id") or file_data.get("id") or post.get("id") or "")
+    media_index = max(0, (_safe_int(file_data.get("num")) or 1) - 1)
+    # gallery-dl's transformed user uses ``name`` for the X handle and
+    # ``nick`` for the display name.  Prefer the current Tweet's author;
+    # ``user`` may refer to the extractor target or a quoted/source user.
+    owner = file_data.get("author") or post.get("author") or {}
+    if not isinstance(owner, dict):
+        owner = {}
+    user = file_data.get("user") or post.get("user") or {}
+    if not isinstance(user, dict):
+        user = {}
+    owner_username = str(
+        owner.get("name") or owner.get("screen_name") or owner.get("username")
+        or file_data.get("owner_username") or post.get("owner_username")
+        or user.get("name") or user.get("screen_name") or user.get("username")
+        or file_data.get("username") or post.get("username") or source_username or ""
+    ).lstrip("@").strip()
+    display_name = str(owner.get("nick") or owner.get("display_name") or user.get("nick") or "")
+    username = owner_username
+    user_id = str(owner.get("id") or owner.get("rest_id") or file_data.get("user_id") or post.get("user_id") or "")
+    content = str(file_data.get("content") or post.get("content") or file_data.get("text") or post.get("text") or "")
+    tweet_url = f"https://x.com/{username}/status/{tweet_id}" if username and tweet_id else ""
+    width = _safe_int(file_data.get("width"))
+    height = _safe_int(file_data.get("height"))
+    duration = _safe_float(file_data.get("duration"))
+    bitrate = _safe_int(file_data.get("bitrate"))
+    fallback_urls: list[str] = []
+    fallback = file_data.get("_fallback") or ()
+    if isinstance(fallback, str):
+        fallback = (fallback,)
+    if isinstance(fallback, (list, tuple)):
+        fallback_urls = [str(value) for value in fallback if value and str(value) != url]
+    video_sources = []
+    if media_type == "video":
+        video_sources.append({
+            "url": url,
+            "width": width,
+            "height": height,
+            "duration": duration,
+            "bitrate": bitrate,
+            "kind": "hls" if ".m3u8" in url.casefold() else "mp4",
+        })
+    metadata = {
+        "platform": "x", "tweet_id": tweet_id, "tweet_url": tweet_url,
+        "username": username, "owner_username": owner_username, "display_name": display_name,
+        "user_id": user_id, "content": content,
+        "date": _safe_date(file_data.get("date") or post.get("date")),
+        "language": str(file_data.get("lang") or post.get("lang") or ""),
+        "hashtags": file_data.get("hashtags") or post.get("hashtags") or (),
+        "mentions": file_data.get("mentions") or post.get("mentions") or (),
+        "likes": _safe_int(file_data.get("favorite_count") or post.get("favorite_count")),
+        "replies": _safe_int(file_data.get("reply_count") or post.get("reply_count")),
+        "retweets": _safe_int(file_data.get("retweet_count") or post.get("retweet_count")),
+        "quotes": _safe_int(file_data.get("quote_count") or post.get("quote_count")),
+        "views": _safe_int(file_data.get("view_count") or post.get("view_count")),
+        "sensitive": bool(file_data.get("sensitive") or post.get("sensitive")),
+        "media_index": media_index, "media_type": media_type, "media_url": url,
+        "width": width, "height": height, "duration": duration, "bitrate": bitrate,
+        "alt_text": str(file_data.get("description") or ""),
+        "source_type": source_type, "source_query": _x_source_query(source_url),
+        "metadata_source": "gallery-dl",
+    }
+    return {
+        "type": "candidate", "platform": "x", "media_type": media_type,
+        "post_id": tweet_id, "tweet_id": tweet_id, "media_index": media_index,
+        "media_identity": f"{tweet_id}:{media_index}", "post_url": tweet_url,
+        "tweet_url": tweet_url, "username": username, "owner_username": owner_username,
+        "display_name": display_name, "user_id": user_id,
+        "description": content, "caption": content, "content": content,
+        "date": metadata["date"], "display_url": url if media_type == "image" else "",
+        "thumbnail_url": "", "media_url": url, "video_url": url if media_type == "video" else "",
+        "fallback_urls": fallback_urls, "video_sources": video_sources,
+        "width": width, "height": height, "duration": duration, "bitrate": bitrate,
+        "alt_text": metadata["alt_text"], "source_url": source_url,
+        "source_type": source_type, "source_query": metadata["source_query"],
+        "source_username": source_username, "metadata": metadata,
+    }
+
+
+def _x_source_query(source_url: str) -> str:
+    try:
+        return unquote_plus(parse_qs(urlsplit(source_url).query).get("q", [""])[0])
+    except (TypeError, ValueError):
+        return ""
+
+
 def _matching_items(
     items: Iterator[tuple[Any, str, dict[str, Any]]],
     media_type: str,
@@ -482,6 +611,7 @@ def run(start: dict[str, Any]) -> int:
     source_type = str(start.get("source_type") or "").strip().lower()
     source_username = str(start.get("source_username") or "").strip()
     source_board_url = str(start.get("source_board_url") or "").strip()
+    search_scope = str(start.get("search_scope") or "media").strip().lower()
     is_post = bool(POST_URL_RE.match(url))
     is_author = bool(AUTHOR_URL_RE.match(url))
     is_tag = bool(TAG_URL_RE.match(url))
@@ -490,21 +620,27 @@ def run(start: dict[str, Any]) -> int:
     is_pinterest_user = bool(PINTEREST_USER_PINS_URL_RE.match(url))
     is_pinterest_board = bool(PINTEREST_BOARD_URL_RE.match(url))
     is_pinterest = platform == "pinterest"
+    is_x = platform in {"x", "twitter"}
+    is_x_author = bool(X_MEDIA_URL_RE.match(url))
+    is_x_search = bool(X_SEARCH_URL_RE.match(url))
     if is_pinterest:
         is_post = is_pinterest_pin
         is_author = is_pinterest_user
         is_tag = is_pinterest_search
+    if is_x:
+        is_author = is_x_author
+        is_tag = is_x_search
     if not is_post and not is_author and not is_tag and not is_pinterest_board:
-        supported = "Pinterest Search, Single Pin, User, or Board" if is_pinterest else "Instagram Author, Hashtag, or Single Post/Reel"
+        supported = "X Author or Search" if is_x else ("Pinterest Search, Single Pin, User, or Board" if is_pinterest else "Instagram Author, Hashtag, or Single Post/Reel")
         _write({"type": "error", "message": f"only {supported} URLs are supported"})
         return 2
     if media_type not in {"image", "video", "mixed"}:
         _write({"type": "error", "message": f"unsupported media_type: {media_type}"})
         return 2
-    if not is_pinterest and not profile_path.is_dir():
+    if not is_pinterest and not is_x and not profile_path.is_dir():
         _write({"type": "error", "message": "Instagram browser profile does not exist"})
         return 2
-    if not is_pinterest and (not isinstance(cookies, dict) or not cookies.get("sessionid")):
+    if not is_pinterest and not is_x and (not isinstance(cookies, dict) or not cookies.get("sessionid")):
         _write({"type": "error", "code": "AUTH_REQUIRED", "message": "Instagram cookie loaded=no; sessionid 未提供"})
         return 2
 
@@ -524,6 +660,12 @@ def run(start: dict[str, Any]) -> int:
             config.set(("extractor", "pinterest"), "videos", True)
             config.set(("extractor", "pinterest"), "audio", False)
             config.set(("extractor", "pinterest"), "sections", False)
+        elif is_x:
+            config.set(("extractor", "twitter"), "cookies", {str(key): str(value) for key, value in cookies.items()})
+            config.set(("extractor", "twitter"), "videos", True)
+            config.set(("extractor", "twitter"), "retweets", False)
+            config.set(("extractor", "twitter"), "quoted", False)
+            config.set(("extractor", "twitter"), "search-results", "top" if search_scope == "top" else "media")
         else:
             config.set(("extractor", "instagram"), "cookies", {str(key): str(value) for key, value in cookies.items()})
             config.set(("extractor", "instagram"), "videos", True)
@@ -546,6 +688,13 @@ def run(start: dict[str, Any]) -> int:
                 mode = "Single Pin" if is_post else ("User" if is_author else ("Board" if is_pinterest_board else "Search"))
                 _write({"type": "error", "message": f"gallery-dl did not resolve a Pinterest {mode} extractor"})
                 return 2
+        elif is_x:
+            expected_subcategories = {"media"} if is_x_author else {"search"}
+            valid = instance is not None and instance.category == "twitter" and instance.subcategory in expected_subcategories
+            if not valid:
+                mode = "Author" if is_x_author else "Search"
+                _write({"type": "error", "message": f"gallery-dl did not resolve an X {mode} extractor"})
+                return 2
         else:
             expected_subcategories = {"post", "reel"} if is_post else ({"posts"} if is_author else {"tag"})
             valid = instance is not None and instance.category == "instagram" and instance.subcategory in expected_subcategories
@@ -564,13 +713,16 @@ def run(start: dict[str, Any]) -> int:
         if version:
             ready["gallery_dl_version"] = version
         _write(ready)
-        if not is_pinterest and not cookie_loaded:
+        if not is_pinterest and not is_x and not cookie_loaded:
             _write({"type": "error", "code": "AUTH_REQUIRED", "message": "Instagram cookie loaded=no"})
             return 2
         pinterest_cookie_required = is_pinterest_search or is_pinterest_user or is_pinterest_board
         if pinterest_cookie_required and not cookie_loaded:
             auth_message = "Pinterest Search requires login" if is_pinterest_search else "Pinterest User/Board requires login"
             _write({"type": "error", "code": "AUTH_REQUIRED", "message": auth_message})
+            return 2
+        if is_x and (not cookie_loaded or not isinstance(cookies, dict) or not cookies.get("auth_token") or not cookies.get("ct0")):
+            _write({"type": "error", "code": "AUTH_REQUIRED", "message": "X AUTH_REQUIRED"})
             return 2
         if is_pinterest:
             # SMC owns media-type filtering so skipped videos/images still advance
@@ -588,6 +740,15 @@ def run(start: dict[str, Any]) -> int:
                 ),
                 source_username=source_username,
                 source_board_url=source_board_url,
+            )
+        elif is_x:
+            candidates = _matching_items(
+                iter(instance.items()),
+                "mixed",
+                platform="x",
+                source_url=url,
+                source_type=source_type or ("author" if is_x_author else "search"),
+                source_username=source_username,
             )
         else:
             try:
@@ -612,6 +773,9 @@ def run(start: dict[str, Any]) -> int:
                 return 2
             candidates = _matching_items(iter(instance.items()), "mixed", str(start.get("source_hashtag") or ""))
     except Exception as exc:
+        if is_x and _is_x_auth_error(exc):
+            _write({"type": "error", "code": "AUTH_REQUIRED", "message": "X AUTH_REQUIRED"})
+            return 2
         if is_pinterest and _is_pinterest_auth_error(exc):
             auth_message = "Pinterest Search requires login" if is_pinterest_search else "Pinterest User/Board requires login"
             _write({"type": "error", "code": "AUTH_REQUIRED", "message": auth_message})
@@ -641,6 +805,9 @@ def run(start: dict[str, Any]) -> int:
             _write({"type": "exhausted"})
             return 0
         except Exception as exc:
+            if is_x and _is_x_auth_error(exc):
+                _write({"type": "error", "code": "AUTH_REQUIRED", "message": "X AUTH_REQUIRED"})
+                return 2
             if is_pinterest and _is_pinterest_auth_error(exc):
                 auth_message = "Pinterest Search requires login" if is_pinterest_search else "Pinterest User/Board requires login"
                 _write({"type": "error", "code": "AUTH_REQUIRED", "message": auth_message})
