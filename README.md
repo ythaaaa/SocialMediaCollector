@@ -13,7 +13,12 @@ Windows 桌面端多平台图片、视频采集工具，面向 Pinterest、X/Twi
 
 | 平台 | 模式 | 图片 | 视频 | 当前采集方式 |
 | --- | --- | --- | --- | --- |
-| Pinterest | Search、Home、Current Page | 支持 | 支持 | Browser / Playwright |
+| Pinterest | Search | 支持 | 支持 | gallery-dl packaged helper |
+| Pinterest | Single Pin | 支持 | 支持 | gallery-dl packaged helper |
+| Pinterest | User | 支持 | 支持 | gallery-dl packaged helper |
+| Pinterest | Board | 支持 | 支持 | gallery-dl packaged helper |
+| Pinterest | Home | 支持 | 支持 | Browser / Playwright |
+| Pinterest | Current Page | 支持 | 支持 | Browser / Playwright |
 | X / Twitter | Search、Author、Home | 支持 | 支持 | Browser / Playwright |
 | Instagram | Single Post、Reel、Author、Hashtag | 支持 | 支持 | gallery-dl packaged helper |
 | YouTube | 开发中 | — | — | 尚未完成 |
@@ -38,6 +43,26 @@ Instagram 当前支持的是 Hashtag / 标签采集，不是普通关键词全�
 
 正常 Instagram 采集阶段不启动 Collection Chrome。首次登录或 Cookie 失效时，仍可能需要用户打开浏览器并人工完成 Instagram 登录。
 
+## Pinterest v2.1
+
+当前开发版已完成：
+
+- Search、Single Pin、User / Profile、Board
+- Pinterest Cookie Bridge
+- Image / Video / Mixed
+- gallery-dl packaged helper
+- Search / User / Board 使用登录 Cookie；Public Single Pin 可匿名
+- Direct MP4、HLS、fMP4 / CMAF、`EXT-X-MAP`、`EXT-X-BYTERANGE`
+- 视频完整性验证
+- Pause / Resume / Stop
+- 当前任务去重与可选历史去重
+
+Search、Single Pin、User 与 Board 的正常采集阶段不启动 Collection Chrome。Pinterest Home 与 Current Page 继续使用 Browser / Playwright。
+
+User 模式可输入用户名、用户主页、`/pins/`、`/_created/` 或 `/_saved/` 链接，统一按 All Pins 语义处理。
+
+Board 模式输入具体 Board / 画板链接，只采集该 Board 的 Pins；当前不会自动展开 Section。
+
 ## 去重语义
 
 - 当前任务内重复素材始终避免。
@@ -52,9 +77,9 @@ Installer 已包含：
 
 - SocialMediaCollector 主程序及运行时
 - FFmpeg
-- Instagram gallery-dl packaged helper
+- Instagram / Pinterest gallery-dl packaged helper
 
-用户不需要另外安装 Python、gallery-dl 或 FFmpeg。Pinterest/X 的浏览器采集和登录仍按软件提示使用本机浏览器；Instagram 正常 Collection 阶段不需要打开 Collection Chrome。
+用户不需要另外安装 Python、gallery-dl 或 FFmpeg。Pinterest Home / Current Page 与 X 的浏览器采集和登录仍按软件提示使用本机浏览器；Instagram 与已支持的 Pinterest gallery-dl 模式在正常 Collection 阶段不需要打开 Collection Chrome。
 
 ### Instagram 登录
 
@@ -89,7 +114,7 @@ README 不包含 Cookie、账号凭据或内部安全实现细节。
 .\.venv\Scripts\python.exe -m pytest
 ```
 
-当前开发状态已验证 `247 passed`；该数字不是固定版本徽章。
+当前开发状态已验证 `304 passed`；该数字不是固定版本徽章。
 
 gallery-dl 说明：
 
@@ -117,12 +142,12 @@ Installer 包含 FFmpeg runtime 及对应许可证、来源和构建信息。完
 
 以下是计划或调查方向，不代表当前已经完成：
 
-- Pinterest gallery-dl feasibility / migration
+- Pinterest Home / Current Page 保留 Browser / Playwright
 - X gallery-dl feasibility / migration
 - YouTube support
 - Instagram 普通 Keyword Search：research / not implemented
 
-当前 Pinterest 和 X 仍使用 Browser / Playwright 路线；Pinterest gallery-dl 调查不会被描述为已完成的产品功能。
+当前 X 仍使用 Browser / Playwright 路线；Pinterest 的 Search、Single Pin、User 与 Board 已使用 gallery-dl packaged helper。
 
 ## 源码运行（开发者）
 
