@@ -19,7 +19,9 @@ Windows 桌面端多平台图片、视频采集工具，面向 Pinterest、X/Twi
 | Pinterest | Board | 支持 | 支持 | gallery-dl packaged helper |
 | Pinterest | Home | 支持 | 支持 | Browser / Playwright |
 | Pinterest | Current Page | 支持 | 支持 | Browser / Playwright |
-| X / Twitter | Search、Author、Home | 支持 | 支持 | Browser / Playwright |
+| X / Twitter | Author | 支持 | 支持 | gallery-dl packaged helper |
+| X / Twitter | Search | 支持 | 支持 | gallery-dl packaged helper |
+| X / Twitter | Home | 支持 | 支持 | Browser / Playwright |
 | Instagram | Single Post、Reel、Author、Hashtag | 支持 | 支持 | gallery-dl packaged helper |
 | YouTube | 开发中 | — | — | 尚未完成 |
 
@@ -62,6 +64,31 @@ Search、Single Pin、User 与 Board 的正常采集阶段不启动 Collection C
 User 模式可输入用户名、用户主页、`/pins/`、`/_created/` 或 `/_saved/` 链接，统一按 All Pins 语义处理。
 
 Board 模式输入具体 Board / 画板链接，只采集该 Board 的 Pins；当前不会自动展开 Section。
+
+## X / Twitter v2.1
+
+当前开发版已完成：
+
+- 独立 X Cookie Bridge
+- 独立 X browser profile
+- DPAPI encrypted cookie store
+- Author / Media Timeline
+- Search
+- Media / Top scope
+- Image / Video / Mixed
+- gallery-dl 1.32.10 packaged helper
+- 原图优先
+- Direct MP4 / HLS
+- Animated GIF → video
+- Prompt Detection 保留
+- target count
+- 当前任务去重与可选历史去重
+- Pause / Resume / Stop
+- Queue / History compatible
+
+X Author 支持输入用户名、`@username`、x.com 用户主页或 twitter.com 用户主页，内部使用作者 Media Timeline。X Search 支持 Media / Top 范围，以及 Image / Video / Mixed 类型。
+
+X Author 与 Search 的正常采集阶段不启动 Collection Chrome；X Home 的图片和视频支持继续使用 legacy Browser / Playwright。
 
 ## 去重语义
 
@@ -114,7 +141,7 @@ README 不包含 Cookie、账号凭据或内部安全实现细节。
 .\.venv\Scripts\python.exe -m pytest
 ```
 
-当前开发状态已验证 `304 passed`；该数字不是固定版本徽章。
+当前开发状态已验证 `338 passed`；该数字不是固定版本徽章。
 
 gallery-dl 说明：
 
@@ -143,11 +170,13 @@ Installer 包含 FFmpeg runtime 及对应许可证、来源和构建信息。完
 以下是计划或调查方向，不代表当前已经完成：
 
 - Pinterest Home / Current Page 保留 Browser / Playwright
-- X gallery-dl feasibility / migration
+- X Home 保留 Browser / Playwright
+- X Single Tweet：future candidate
+- X Likes / Lists / Hashtag：future evaluation
 - YouTube support
 - Instagram 普通 Keyword Search：research / not implemented
 
-当前 X 仍使用 Browser / Playwright 路线；Pinterest 的 Search、Single Pin、User 与 Board 已使用 gallery-dl packaged helper。
+当前 X 的 Author 与 Search 已使用 gallery-dl packaged helper；X Home 继续使用 Browser / Playwright。Pinterest 的 Search、Single Pin、User 与 Board 已使用 gallery-dl packaged helper。
 
 ## 源码运行（开发者）
 
