@@ -74,6 +74,35 @@ class PinterestVideoSource:
     container: str = ""
 
 
+class _PinterestEndTracker:
+    """Require sustained inactivity, then a recovery pass, before ending a feed."""
+
+    empty_round_limit = 10
+
+    def __init__(self) -> None:
+        self.empty_rounds = 0
+
+    def observe(self, *, new_urls: bool, height_grew: bool, pin_count_grew: bool) -> bool:
+        """Return whether the feed needs a recovery pass.
+
+        A changed scroll height or a growing visible Pin count is activity too.  A
+        shrinking/stable DOM is deliberately not considered evidence of the end:
+        Pinterest virtualizes its masonry feed.
+        """
+        if new_urls or height_grew or pin_count_grew:
+            self.empty_rounds = 0
+            return False
+        self.empty_rounds += 1
+        return self.empty_rounds >= self.empty_round_limit
+
+    def recovery_finished(self, *, new_urls: bool, height_grew: bool, pin_count_grew: bool) -> bool:
+        """Return True only when recovery also found no evidence of activity."""
+        if new_urls or height_grew or pin_count_grew:
+            self.empty_rounds = 0
+            return False
+        return True
+
+
 class PinterestCollector(BrowserSession):
     """Collects image resource URLs visible in Pinterest's public search UI."""
     def __init__(self, profile_dir: Path, log: Callable[[str], None]) -> None:
@@ -228,26 +257,98 @@ class PinterestCollector(BrowserSession):
         if not candidates and not finish():
             raise RuntimeError(empty_message)
 
-        stale_rounds = 0
+        end_tracker = _PinterestEndTracker()
+        previous_metrics = self._scroll_metrics(page)
         for _ in range(max_scrolls + 1):
             if should_stop() or finish():
                 break
             should_pause()
+            self._scroll_page(page, 2600)
+            page.wait_for_timeout(1800)
             before = len(candidates)
             self._collect_visible(page, candidates, require_pin=require_pin, on_candidate=on_candidate, media_type=media_type)
             on_found(len(candidates))
             if finish():
                 break
-            if len(candidates) == before:
-                stale_rounds += 1
-            else:
-                stale_rounds = 0
-            if stale_rounds >= 8:
-                self.log("连续滚动未发现新的 Pin，结束收集；可能页面暂无更多可采集内容。")
-                break
-            page.mouse.wheel(0, 1800)
-            page.wait_for_timeout(1100)
+            metrics = self._scroll_metrics(page)
+            new_urls = len(candidates) > before
+            height_grew, pin_count_grew = self._feed_grew(previous_metrics, metrics)
+            previous_metrics = metrics
+            if end_tracker.observe(
+                new_urls=new_urls,
+                height_grew=height_grew,
+                pin_count_grew=pin_count_grew,
+            ):
+                self.log("连续 10 轮未发现新内容，正在执行页面恢复滚动...")
+                before_recovery = len(candidates)
+                recovery_before = previous_metrics
+                self._recover_page(page)
+                self._collect_visible(page, candidates, require_pin=require_pin, on_candidate=on_candidate, media_type=media_type)
+                on_found(len(candidates))
+                if finish():
+                    break
+                recovery_metrics = self._scroll_metrics(page)
+                height_grew, pin_count_grew = self._feed_grew(recovery_before, recovery_metrics)
+                previous_metrics = recovery_metrics
+                if end_tracker.recovery_finished(
+                    new_urls=len(candidates) > before_recovery,
+                    height_grew=height_grew,
+                    pin_count_grew=pin_count_grew,
+                ):
+                    self.log("经过多轮滚动和恢复尝试，页面未发现更多可采集内容。")
+                    break
+                self.log("恢复滚动发现新内容，继续采集。")
+            elif end_tracker.empty_rounds:
+                self.log(f"连续 {end_tracker.empty_rounds}/10 轮未发现新内容，继续尝试加载...")
         return list(candidates.values())
+
+    @staticmethod
+    def _feed_grew(previous: tuple[int, int], current: tuple[int, int]) -> tuple[bool, bool]:
+        return current[0] > previous[0], current[1] > previous[1]
+
+    def _scroll_metrics(self, page: Page) -> tuple[int, int]:
+        """Read the active scrolling container, rather than assuming window scroll."""
+        try:
+            height, pin_count = page.evaluate("""() => {
+                const root = document.scrollingElement || document.documentElement;
+                const atPoint = document.elementFromPoint(window.innerWidth / 2, window.innerHeight / 2);
+                let container = atPoint;
+                while (container && container !== document.body) {
+                    const style = getComputedStyle(container);
+                    if (/(auto|scroll)/.test(style.overflowY) && container.scrollHeight > container.clientHeight) break;
+                    container = container.parentElement;
+                }
+                container = container && container.scrollHeight > container.clientHeight ? container : root;
+                return [Math.max(root.scrollHeight, container.scrollHeight), document.querySelectorAll('a[href*="/pin/"]').length];
+            }""")
+            return int(height), int(pin_count)
+        except (PlaywrightError, TypeError, ValueError):
+            return 0, 0
+
+    def _scroll_page(self, page: Page, distance: int) -> None:
+        """Scroll Pinterest's actual feed container, with wheel as a safe fallback."""
+        try:
+            page.evaluate("""distance => {
+                const root = document.scrollingElement || document.documentElement;
+                const atPoint = document.elementFromPoint(window.innerWidth / 2, window.innerHeight / 2);
+                let container = atPoint;
+                while (container && container !== document.body) {
+                    const style = getComputedStyle(container);
+                    if (/(auto|scroll)/.test(style.overflowY) && container.scrollHeight > container.clientHeight) break;
+                    container = container.parentElement;
+                }
+                (container && container.scrollHeight > container.clientHeight ? container : root).scrollBy({top: distance, behavior: 'auto'});
+            }""", distance)
+        except PlaywrightError:
+            page.mouse.wheel(0, distance)
+
+    def _recover_page(self, page: Page) -> None:
+        self._scroll_page(page, -700)
+        page.wait_for_timeout(1200)
+        self._scroll_page(page, 4200)
+        page.wait_for_timeout(2200)
+        self._scroll_page(page, 1000000)
+        page.wait_for_timeout(2200)
 
     def _select_pinterest_page(self) -> Page | None:
         if not self._context:

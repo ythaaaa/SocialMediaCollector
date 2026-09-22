@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from src.browser.collector import ImageCandidate, PinterestCollector
+from src.browser.collector import ImageCandidate, PinterestCollector, _PinterestEndTracker
 
 
 def test_srcset_prefers_largest_declared_candidate() -> None:
@@ -111,3 +111,117 @@ def test_pinterest_video_pin_is_candidate_but_its_poster_is_not_image() -> None:
     assert candidate.media_type == "video"
     assert candidate.image_url == ""
     assert candidate.media_url.endswith("video.mp4")
+
+
+def test_pinterest_empty_rounds_do_not_end_before_a_delayed_sixth_pin() -> None:
+    tracker = _PinterestEndTracker()
+
+    for _ in range(5):
+        assert not tracker.observe(new_urls=False, height_grew=False, pin_count_grew=False)
+
+    assert not tracker.observe(new_urls=True, height_grew=False, pin_count_grew=False)
+    assert tracker.empty_rounds == 0
+
+
+def test_pinterest_scroll_height_growth_resets_empty_rounds() -> None:
+    tracker = _PinterestEndTracker()
+
+    for _ in range(4):
+        tracker.observe(new_urls=False, height_grew=False, pin_count_grew=False)
+    assert not tracker.observe(new_urls=False, height_grew=True, pin_count_grew=False)
+    assert tracker.empty_rounds == 0
+
+
+def test_pinterest_new_media_url_continues_when_virtual_dom_pin_count_is_flat() -> None:
+    tracker = _PinterestEndTracker()
+
+    for _ in range(6):
+        tracker.observe(new_urls=False, height_grew=False, pin_count_grew=False)
+    assert not tracker.observe(new_urls=True, height_grew=False, pin_count_grew=False)
+    assert tracker.empty_rounds == 0
+
+
+def test_pinterest_recovery_with_new_content_resets_empty_rounds() -> None:
+    tracker = _PinterestEndTracker()
+
+    for _ in range(tracker.empty_round_limit):
+        needs_recovery = tracker.observe(new_urls=False, height_grew=False, pin_count_grew=False)
+    assert needs_recovery
+    assert not tracker.recovery_finished(new_urls=True, height_grew=False, pin_count_grew=False)
+    assert tracker.empty_rounds == 0
+
+
+def test_pinterest_only_confirms_end_after_empty_recovery() -> None:
+    tracker = _PinterestEndTracker()
+
+    for _ in range(tracker.empty_round_limit):
+        needs_recovery = tracker.observe(new_urls=False, height_grew=False, pin_count_grew=False)
+    assert needs_recovery
+    assert tracker.recovery_finished(new_urls=False, height_grew=False, pin_count_grew=False)
+
+
+def test_pinterest_end_tracker_requires_ten_effective_empty_rounds() -> None:
+    """A 17/50 task (and a feed full of skipped duplicates) cannot end after a short gap."""
+    tracker = _PinterestEndTracker()
+
+    for _ in range(9):
+        assert not tracker.observe(new_urls=False, height_grew=False, pin_count_grew=False)
+    assert tracker.observe(new_urls=False, height_grew=False, pin_count_grew=False)
+
+
+def test_pinterest_collector_does_not_end_a_17_of_50_task_before_delayed_content(monkeypatch) -> None:
+    class Page:
+        def wait_for_timeout(self, _milliseconds):
+            return None
+
+    collector = PinterestCollector(Path("profile"), lambda _message: None)
+    calls = 0
+
+    def collect_visible(_page, candidates, **_kwargs):
+        nonlocal calls
+        calls += 1
+        if calls in {1, 7}:  # Initial content, then a Pin after five empty scrolls.
+            candidates[f"https://i.pinimg.com/originals/{calls}.jpg"] = ImageCandidate("", "")
+
+    monkeypatch.setattr(collector, "_collect_visible", collect_visible)
+    monkeypatch.setattr(collector, "_scroll_metrics", lambda _page: (1000, 10))
+    monkeypatch.setattr(collector, "_scroll_page", lambda _page, _distance: None)
+
+    candidates = collector._collect_page(
+        Page(), 50, 6, lambda: False, lambda: None, lambda _count: None,
+        None, lambda: False, True, "image", "empty",
+    )
+
+    assert len(candidates) == 2
+
+
+def test_pinterest_collector_stops_at_successful_target_not_discovered_count(monkeypatch) -> None:
+    class Page:
+        def wait_for_timeout(self, _milliseconds):
+            return None
+
+    collector = PinterestCollector(Path("profile"), lambda _message: None)
+    successful_saved = 0
+
+    def collect_visible(_page, candidates, **_kwargs):
+        index = len(candidates)
+        candidate = ImageCandidate(f"https://i.pinimg.com/originals/{index}.jpg", "")
+        candidates[candidate.image_url] = candidate
+        _kwargs["on_candidate"](candidate)
+
+    def saved(_candidate):
+        nonlocal successful_saved
+        successful_saved += 1
+
+    monkeypatch.setattr(collector, "_collect_visible", collect_visible)
+    monkeypatch.setattr(collector, "_scroll_metrics", lambda _page: (1000, 10))
+    monkeypatch.setattr(collector, "_scroll_page", lambda _page, _distance: None)
+    monkeypatch.setattr(collector, "_recover_page", lambda _page: None)
+
+    candidates = collector._collect_page(
+        Page(), 50, 60, lambda: False, lambda: None, lambda _count: None,
+        saved, lambda: successful_saved >= 50, True, "image", "empty",
+    )
+
+    assert successful_saved == 50
+    assert len(candidates) == 50
