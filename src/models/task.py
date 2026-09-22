@@ -9,6 +9,7 @@ from src.utils.x import normalize_x_author
 from src.platforms import get_platform_spec
 from src.utils.instagram import normalize_hashtag
 from src.utils.pinterest import normalize_pinterest_board_url, normalize_pinterest_pin_url, normalize_pinterest_username
+from src.utils.youtube import youtube_url_kind
 
 
 TASK_STATUSES = frozenset({"pending", "running", "paused", "completed", "failed", "stopped", "interrupted"})
@@ -66,6 +67,13 @@ class TaskConfig:
     search_scope: str = "media"
     only_prompt_posts: bool = False
     skip_history_duplicates: bool = False
+    video_quality: str = "best"
+    audio_format: str = "best"
+    youtube_use_browser_cookies: bool = False
+    youtube_browser: str = "chrome"
+    youtube_browser_profile: str = "Default"
+    youtube_cookie_source: str = "none"
+    youtube_cookie_file: str = ""
     # V2 queue fields. Legacy fields above remain the source of truth for V1.
     task_id: str = field(default_factory=lambda: uuid4().hex)
     status: str = "pending"
@@ -149,6 +157,8 @@ class TaskConfig:
         source_value = str(data.get("source_value") or "")
         collection_mode = str(data.get("collection_mode") or data.get("mode") or "search")
         source_identifier = str(data.get("source_identifier") or data.get("source_value") or "")
+        legacy_cookie_source = "chrome" if _as_bool(data.get("youtube_use_browser_cookies"), False) else "none"
+        cookie_source = str(data.get("youtube_cookie_source") or legacy_cookie_source).strip().lower()
         return cls(
             keyword=str(data.get("keyword") or (source_value if platform == "pinterest" else "")),
             target_count=int(data.get("target_count", 0)),
@@ -173,6 +183,13 @@ class TaskConfig:
             search_scope=str(data.get("search_scope") or "media"),
             only_prompt_posts=bool(data.get("only_prompt_posts", False)),
             skip_history_duplicates=_as_bool(data.get("skip_history_duplicates"), False),
+            video_quality=str(data.get("video_quality") or "best"),
+            audio_format=str(data.get("audio_format") or "best"),
+            youtube_use_browser_cookies=_as_bool(data.get("youtube_use_browser_cookies"), False),
+            youtube_browser=str(data.get("youtube_browser") or "chrome"),
+            youtube_browser_profile=str(data.get("youtube_browser_profile") or "Default"),
+            youtube_cookie_source=cookie_source,
+            youtube_cookie_file=str(data.get("youtube_cookie_file") or ""),
             task_id=str(data.get("task_id") or uuid4().hex),
             status=str(data.get("status") or "pending"),
         )
@@ -210,6 +227,22 @@ class TaskConfig:
                 raise ValueError("Instagram 下载内容类型无效")
             if not self.source_value.strip():
                 raise ValueError("Instagram 目标不能为空")
+        elif platform == "youtube":
+            if self.canonical_media_type() not in {"video", "audio", "thumbnail"}:
+                raise ValueError("YouTube 下载内容类型无效")
+            if not self.source_value.strip():
+                raise ValueError("YouTube URL 不能为空")
+            kind = youtube_url_kind(self.source_value)
+            if collection_mode != "auto" and kind != collection_mode:
+                raise ValueError("YouTube URL 与选择的采集模式不匹配")
+            if self.video_quality not in {"best", "1080", "720", "480"}:
+                raise ValueError("YouTube 视频质量无效")
+            if self.youtube_browser != "chrome":
+                raise ValueError("YouTube 当前只支持 Chrome Cookies")
+            if self.youtube_cookie_source not in {"none", "chrome", "firefox", "file"}:
+                raise ValueError("YouTube Cookies 来源无效")
+            if self.youtube_cookie_source == "file" and not self.youtube_cookie_file.strip():
+                raise ValueError("请选择 cookies.txt 文件")
         elif self.canonical_media_type() not in {"image", "video", "mixed"}:
             raise ValueError("Pinterest 下载内容类型无效")
         if self.target_count < 1:

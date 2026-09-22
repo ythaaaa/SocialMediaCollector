@@ -38,6 +38,8 @@ from src.utils.pinterest import (
     pinterest_user_url,
 )
 from src.utils.x import x_author_media_url, x_search_url
+from src.utils.youtube import youtube_url_kind
+from src.adapters.youtube import YouTubeAdapter, YouTubeCancelled, YouTubeError
 
 
 class DownloadEngine:
@@ -186,6 +188,10 @@ class DownloadEngine:
             task_name = f"x_{raw_query}"
         elif platform == "x":
             task_name = "x_首页推荐流"
+        elif platform == "youtube":
+            kind = youtube_url_kind(self.config.canonical_source_value)
+            self.config = replace(self.config, source_identifier=self.config.canonical_source_value, source_page_url=self.config.canonical_source_value)
+            task_name = f"youtube_{kind}"
         else:
             task_name = {
                 "search": self.config.keyword,
@@ -198,6 +204,8 @@ class DownloadEngine:
         self.task_dir = self.task_output_dir
         if self.on_task_dir:
             self.on_task_dir(self.task_output_dir)
+        if platform == "youtube":
+            return self._run_youtube()
         collector = None
         if platform == "instagram" and not gallerydl_enabled:
             collector = InstagramCollector(self.profile_dir, self.on_log)
@@ -358,6 +366,100 @@ class DownloadEngine:
             if collector is not None:
                 collector.close()
         return self.task_dir
+
+    def _run_youtube(self) -> Path:
+        """Process yt-dlp entries sequentially so target counts mean saved files."""
+        assert self.task_dir and self.task_output_dir
+        store = TaskStore(self.task_dir, self.config)
+        self.database.start_task(self.config, self.task_output_dir)
+        adapter = YouTubeAdapter()
+        known = store.known_hashes()
+        self._current_task_hashes.update(known)
+        try:
+            self._emit("正在使用 yt-dlp 发现 YouTube 视频")
+            for candidate in adapter.entries(self.config.canonical_source_value, cookie_source=self.config.youtube_cookie_source, browser_profile=self.config.youtube_browser_profile, cookie_file=self.config.youtube_cookie_file):
+                if self.stop_event.is_set() or self.stats.downloaded >= self.config.target_count:
+                    break
+                self.stats.discovered += 1
+                self._emit()
+                self._wait_if_paused()
+                keys = self._current_candidate_keys(candidate)
+                if any(key in self._current_task_candidate_keys for key in keys):
+                    self._record_duplicate("已跳过当前任务重复 YouTube 视频")
+                    continue
+                self._current_task_candidate_keys.update(keys)
+                if self.config.skip_history_duplicates and self.database.find_duplicate(candidate, self.config.canonical_source_value, require_local_file=False):
+                    self._record_duplicate("已跳过历史重复 YouTube 视频")
+                    self._emit()
+                    continue
+                self._emit(f"正在下载：{candidate.post_text or candidate.post_id}")
+                record = DownloadRecord(
+                    "", self.config.source_identifier, candidate.post_url, candidate.media_url,
+                    collection_mode=self.config.canonical_collection_mode(), source_page_url=self.config.source_page_url,
+                    platform="youtube", author_username=candidate.author_username, post_url=candidate.post_url,
+                    media_type=self.config.canonical_media_type(), media_url=candidate.media_url,
+                    duration=candidate.duration, video_width=candidate.video_width, video_height=candidate.video_height,
+                    post_id=candidate.post_id, post_text=candidate.post_text, thumbnail_url=candidate.thumbnail_url,
+                    source_type=candidate.source_type, collected_at=datetime.now().isoformat(timespec="seconds"),
+                )
+                try:
+                    media_type = self.config.canonical_media_type()
+                    output_dir = self.task_dir / ("images" if media_type == "thumbnail" else "videos")
+                    result = adapter.download(
+                        candidate, output_dir, self.stats.downloaded + 1, media_type=media_type,
+                        quality=self.config.video_quality, audio_format=self.config.audio_format,
+                        should_stop=self.stop_event.is_set, should_pause=self._wait_if_paused, on_log=self.on_log,
+                        cookie_source=self.config.youtube_cookie_source,
+                        browser_profile=self.config.youtube_browser_profile, cookie_file=self.config.youtube_cookie_file,
+                    )
+                    if self.stop_event.is_set():
+                        raise YouTubeCancelled("用户已停止任务")
+                    digest = adapter.file_hash(result.path)
+                    if digest in known or digest in self._current_task_hashes or (
+                        self.config.skip_history_duplicates and self.database.find_hash_duplicate(digest, result.path, require_local_file=False)
+                    ):
+                        result.path.unlink(missing_ok=True)
+                        self._record_duplicate("已跳过内容重复 YouTube 视频")
+                        record.status, record.reason, record.content_hash = "skipped", "内容重复", digest
+                        store.append(record)
+                        continue
+                    relative = result.path.relative_to(self.task_dir).as_posix()
+                    info = result.info
+                    record.filename, record.file_size, record.image_format = relative, result.path.stat().st_size, result.path.suffix.lstrip(".").upper()
+                    record.content_hash, record.status = digest, "downloaded"
+                    record.downloaded_at = datetime.now().isoformat(timespec="seconds")
+                    record.duration = info.get("duration") or record.duration
+                    record.video_width = info.get("width") or record.video_width
+                    record.video_height = info.get("height") or record.video_height
+                    record.bitrate = info.get("tbr") or record.bitrate
+                    record.thumbnail_url = info.get("thumbnail") or record.thumbnail_url
+                    store.append(record)
+                    known.add(digest); self._current_task_hashes.add(digest); self.stats.downloaded += 1
+                    self.database.register_media(candidate, self.config.canonical_source_value, digest, result.path, self.config.task_id)
+                    self.on_log(f"已保存 {relative}")
+                    self.on_log(f"下载统计：成功保存 {self.stats.downloaded}/{self.config.target_count}")
+                    self._emit()
+                    self._sleep_interval()
+                except YouTubeCancelled:
+                    break
+                except (YouTubeError, OSError, ValueError) as exc:
+                    self.stats.failed += 1
+                    record.status, record.reason = "failed", str(exc)
+                    store.append(record)
+                    self.on_log(f"YouTube 下载失败，跳过后续继续：{exc}")
+                    self._emit()
+            status = "已停止" if self.stop_event.is_set() else ("任务完成" if self.stats.downloaded >= self.config.target_count else "采集结束（YouTube 已无更多条目）")
+            store.complete(self.stats, self.stop_event.is_set())
+            self.database.finish_task(self.config, self.stats, "stopped" if self.stop_event.is_set() else "completed", task_output_dir=self.task_output_dir)
+            self._emit(status)
+            return self.task_dir
+        except Exception as exc:
+            store.complete(self.stats, self.stop_event.is_set(), str(exc))
+            self.database.finish_task(self.config, self.stats, "stopped" if self.stop_event.is_set() else "failed", str(exc), self.task_output_dir)
+            if self.stop_event.is_set():
+                self._emit("已停止")
+                return self.task_dir
+            raise
 
     def _on_found(self, count: int) -> None:
         self.stats.discovered = count; self._emit()

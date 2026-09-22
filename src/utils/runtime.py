@@ -33,6 +33,15 @@ def _bundled_ffmpeg_candidates() -> tuple[Path, ...]:
     )
 
 
+def find_deno() -> str | None:
+    """Locate the Deno runtime bundled with the app before falling back to PATH."""
+    root = runtime_root()
+    for candidate in (root / "tools" / "deno" / "deno.exe", root / "deno.exe"):
+        if candidate.is_file():
+            return str(candidate)
+    return shutil.which("deno")
+
+
 def bundled_ffmpeg_runtime_complete(executable: Path) -> bool:
     """Check the shared DLL set shipped beside the formal LGPL executable."""
     return executable.is_file() and all(

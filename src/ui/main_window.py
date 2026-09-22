@@ -123,7 +123,7 @@ class RuntimeApplication(QApplication):
 
 
 class NoWheelMixin:
-    """Keep page scrolling natural without changing a numeric field by accident."""
+    """Keep page scrolling natural without changing a configuration field by accident."""
 
     def wheelEvent(self, event) -> None:  # noqa: N802 - Qt event API
         event.ignore()
@@ -134,6 +134,10 @@ class NoWheelSpinBox(NoWheelMixin, QSpinBox):
 
 
 class NoWheelDoubleSpinBox(NoWheelMixin, QDoubleSpinBox):
+    pass
+
+
+class NoWheelComboBox(NoWheelMixin, QComboBox):
     pass
 
 
@@ -288,25 +292,44 @@ class MainWindow(QMainWindow):
         self._set_running(False)
 
     def _create_controls(self) -> None:
-        self.platform = QComboBox()
+        self.platform = NoWheelComboBox()
         self.platform.setIconSize(QSize(18, 18))
         self._populate_platforms()
         self.platform.setMinimumHeight(36)
-        self.mode = QComboBox()
+        self.mode = NoWheelComboBox()
         self.mode.setMinimumHeight(36)
         self._search_scope_state = "media"
-        self.search_scope = QComboBox()
+        self.search_scope = NoWheelComboBox()
         self.search_scope.addItem("媒体", "media")
         self.search_scope.addItem("热门", "top")
         self.search_scope.setMinimumHeight(36)
         self.search_scope_label = self._field_label("搜索范围")
         self.search_scope_field = self._parameter_field_with_label(self.search_scope_label, self.search_scope)
-        self.media_type = QComboBox()
+        self.media_type = NoWheelComboBox()
         self.media_type.addItem("仅图片", "image")
         self.media_type.addItem("仅视频", "video")
         self.media_type.addItem("图片 + 视频", "mixed")
         self.media_type.setMinimumHeight(36)
         self.media_type_label = self._field_label("下载内容类型")
+        self.video_quality = NoWheelComboBox()
+        for label, value in (("最佳质量", "best"), ("最高 1080P", "1080"), ("最高 720P", "720"), ("最高 480P", "480")):
+            self.video_quality.addItem(label, value)
+        self.video_quality.setMinimumHeight(36)
+        self.video_quality_label = self._field_label("视频质量")
+        self.youtube_cookie_source = NoWheelComboBox()
+        for label, value in (("不使用", "none"), ("Chrome", "chrome"), ("Firefox", "firefox"), ("cookies.txt", "file")):
+            self.youtube_cookie_source.addItem(label, value)
+        self.youtube_cookie_source_label = self._field_label("Cookies 来源")
+        self.youtube_cookie_file = QLineEdit()
+        self.youtube_cookie_file.setPlaceholderText("选择 Netscape 格式 cookies.txt")
+        self.youtube_cookie_file_button = QPushButton("选择 cookies.txt...")
+        self.youtube_cookie_file_button.clicked.connect(self._choose_youtube_cookie_file)
+        cookie_file_row = QHBoxLayout()
+        cookie_file_row.setContentsMargins(0, 0, 0, 0)
+        cookie_file_row.addWidget(self.youtube_cookie_file, 1)
+        cookie_file_row.addWidget(self.youtube_cookie_file_button)
+        self.youtube_cookie_file_widget = QWidget()
+        self.youtube_cookie_file_widget.setLayout(cookie_file_row)
         self.keyword = QLineEdit()
         self.keyword.setMinimumHeight(42)
         self.source_label = self._field_label("搜索关键词")
@@ -573,6 +596,11 @@ class MainWindow(QMainWindow):
         layout.addWidget(self.batch_input)
         layout.addWidget(self.add_queue)
         layout.addWidget(self.mode_hint)
+        layout.addWidget(self.video_quality_label)
+        layout.addWidget(self.video_quality)
+        layout.addWidget(self.youtube_cookie_source_label)
+        layout.addWidget(self.youtube_cookie_source)
+        layout.addWidget(self.youtube_cookie_file_widget)
         layout.addWidget(self.only_author)
         layout.addWidget(self.only_prompt)
         return card
@@ -745,10 +773,20 @@ class MainWindow(QMainWindow):
         self.platform.currentIndexChanged.connect(self._platform_changed)
         self.mode.currentIndexChanged.connect(self._mode_changed)
         self.search_scope.currentIndexChanged.connect(self._search_scope_changed)
+        self.youtube_cookie_source.currentIndexChanged.connect(self._update_youtube_cookie_controls)
 
     def _search_scope_changed(self, _index: int) -> None:
         if self.platform.currentData() == "x" and self.mode.currentData() == "search":
             self._search_scope_state = str(self.search_scope.currentData() or "media")
+
+    def _update_youtube_cookie_controls(self, _index: int | None = None) -> None:
+        is_file = self.platform.currentData() == "youtube" and self.youtube_cookie_source.currentData() == "file"
+        self.youtube_cookie_file_widget.setVisible(is_file)
+
+    def _choose_youtube_cookie_file(self) -> None:
+        filename, _filter = QFileDialog.getOpenFileName(self, "选择 cookies.txt", self.youtube_cookie_file.text(), "Cookie files (*.txt);;All files (*)")
+        if filename:
+            self.youtube_cookie_file.setText(filename)
 
     def _populate_platforms(self) -> None:
         self.platform.clear()
@@ -829,6 +867,11 @@ class MainWindow(QMainWindow):
             self._show_development_platform(spec)
             return
         self._set_platform_controls_enabled(True)
+        self.video_quality_label.setVisible(False)
+        self.video_quality.setVisible(False)
+        self.youtube_cookie_source_label.setVisible(False)
+        self.youtube_cookie_source.setVisible(False)
+        self.youtube_cookie_file_widget.setVisible(False)
         if platform == "instagram":
             author_mode = mode == "author"
             hashtag_mode = mode == "hashtag"
@@ -896,6 +939,28 @@ class MainWindow(QMainWindow):
                 self.keyword.setVisible(False)
             return
 
+        if platform == "youtube":
+            self.source_label.setText("YouTube URL")
+            self.source_label.setVisible(True)
+            self.keyword.setVisible(True)
+            self.keyword.setEnabled(True)
+            self.keyword.setPlaceholderText("视频、Shorts、Playlist 或频道 URL")
+            self.mode_hint.setText("使用 yt-dlp 下载公开 YouTube 视频；Playlist 和频道会持续处理到成功数量达到目标或条目耗尽。")
+            self.only_author.setVisible(False)
+            self.only_prompt.setVisible(False)
+            self.media_type_label.setVisible(True)
+            self.media_type.setVisible(True)
+            self.video_quality_label.setVisible(True)
+            self.video_quality.setVisible(True)
+            self.youtube_cookie_source_label.setVisible(True)
+            self.youtube_cookie_source.setVisible(True)
+            self._update_youtube_cookie_controls()
+            self.search_scope_label.setVisible(False)
+            self.search_scope.setVisible(False)
+            self.search_scope_field.setVisible(False)
+            self._update_batch_controls()
+            return
+
         single_pin = mode == "single_post"
         user_mode = mode == "user"
         board_mode = mode == "board"
@@ -938,6 +1003,11 @@ class MainWindow(QMainWindow):
             )
         self.only_author.setVisible(False)
         self.only_prompt.setVisible(False)
+        self.video_quality_label.setVisible(False)
+        self.video_quality.setVisible(False)
+        self.youtube_cookie_source_label.setVisible(False)
+        self.youtube_cookie_source.setVisible(False)
+        self.youtube_cookie_file_widget.setVisible(False)
         self.media_type_label.setVisible(True)
         self.media_type.setVisible(True)
         self.search_scope_label.setVisible(False)
@@ -1032,7 +1102,7 @@ class MainWindow(QMainWindow):
             else pinterest_board
             if pinterest_board
             else source_text
-            if (platform in {"x", "instagram"} and mode in {"author", "search", "single_post"})
+            if (platform in {"x", "instagram", "youtube"} and mode in {"author", "search", "single_post", "auto", "single_video", "playlist", "channel"})
             or (platform == "pinterest" and mode == "single_post")
             else ""
         )
@@ -1055,6 +1125,10 @@ class MainWindow(QMainWindow):
             search_scope=str(self.search_scope.currentData()) if platform == "x" and mode == "search" else "media",
             only_prompt_posts=self.only_prompt.isChecked() if platform == "x" else False,
             skip_history_duplicates=self.skip_history_duplicates.isChecked(),
+            video_quality=str(self.video_quality.currentData()) if platform == "youtube" else "best",
+            youtube_use_browser_cookies=str(self.youtube_cookie_source.currentData()) == "chrome" if platform == "youtube" else False,
+            youtube_cookie_source=str(self.youtube_cookie_source.currentData()) if platform == "youtube" else "none",
+            youtube_cookie_file=self.youtube_cookie_file.text().strip() if platform == "youtube" else "",
         )
 
     def _save_root(self) -> Path:

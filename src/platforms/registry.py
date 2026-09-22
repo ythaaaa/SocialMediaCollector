@@ -8,6 +8,7 @@ from dataclasses import dataclass
 
 
 MODE_LABELS = {
+    "auto": "自动识别 URL",
     "search": "关键词搜索",
     "home": "首页推荐",
     "current_page": "当前页面",
@@ -18,6 +19,7 @@ MODE_LABELS = {
     "hashtag": "Hashtag / 标签",
     "channel": "频道",
     "single_video": "单条视频",
+    "playlist": "播放列表",
 }
 
 MEDIA_TYPE_LABELS = {
@@ -26,6 +28,7 @@ MEDIA_TYPE_LABELS = {
     "mixed": "图片 + 视频",
     "thumbnail": "仅封面",
     "video_thumbnail": "视频 + 封面",
+    "audio": "仅音频",
 }
 
 
@@ -74,12 +77,12 @@ PLATFORM_REGISTRY: dict[str, PlatformSpec] = {
     ),
     "youtube": PlatformSpec(
         key="youtube",
-        label="YouTube · 开发中",
+        label="YouTube",
         icon="icons/platforms/youtube.svg",
-        enabled=False,
-        collection_modes=("search", "channel", "single_video"),
-        media_types=("video", "thumbnail", "video_thumbnail"),
-        default_mode="search",
+        enabled=True,
+        collection_modes=("auto", "single_video", "playlist", "channel"),
+        media_types=("video", "audio", "thumbnail"),
+        default_mode="auto",
         default_media_type="video",
     ),
 }

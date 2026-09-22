@@ -27,7 +27,8 @@ $instagramCookieBridgeWorker = Join-Path $projectRoot 'src\adapters\instagram_co
 $ffmpeg = Join-Path $projectRoot 'vendor\ffmpeg\ffmpeg.exe'
 $license = Join-Path $projectRoot 'vendor\ffmpeg\LICENSE.txt'
 $systemIcu = Join-Path $env:SystemRoot 'System32\icuuc.dll'
-foreach ($required in @($python, $ffmpeg, $license, $systemIcu)) {
+$deno = Join-Path $env:USERPROFILE '.deno\bin\deno.exe'
+foreach ($required in @($python, $ffmpeg, $license, $systemIcu, $deno)) {
     if (-not (Test-Path -LiteralPath $required -PathType Leaf)) {
         throw "缺少发布资源：$required"
     }
@@ -63,6 +64,9 @@ $pyInstallerArgs = @(
     '--add-binary', "$ffmpeg;vendor\ffmpeg",
     '--icon', (Join-Path $assets 'app_icon.ico'),
     '--version-file', (Join-Path $projectRoot 'installer\version_info.txt'),
+    '--collect-all', 'yt_dlp',
+    '--collect-all', 'yt_dlp_ejs',
+    '--add-binary', "$deno;tools\deno",
     'app.py'
 )
 if ($helperRelease) {

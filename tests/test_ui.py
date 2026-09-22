@@ -8,12 +8,13 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import pytest
 from PIL import Image
-from PySide6.QtCore import QItemSelectionModel, Qt
+from PySide6.QtCore import QItemSelectionModel, QPoint, QPointF, Qt
+from PySide6.QtGui import QWheelEvent
 from PySide6.QtWidgets import QApplication, QFrame, QLabel
 
 from src.models import TaskConfig, TaskStats
 from src.ui import main_window as main_window_module
-from src.ui.main_window import MainWindow
+from src.ui.main_window import MainWindow, NoWheelComboBox
 from src.ui.resources import WINDOWS_APP_USER_MODEL_ID, app_icon_path
 from src.downloader.engine import DownloadEngine
 from src.storage import CollectorDatabase
@@ -151,7 +152,7 @@ def test_instagram_form_exposes_author_and_single_post_without_x_controls(window
     assert post.source_identifier.endswith("ABC123/")
 
 
-def test_platform_combo_uses_registry_icons_and_disables_youtube(window: MainWindow) -> None:
+def test_platform_combo_uses_registry_icons_and_enables_youtube(window: MainWindow) -> None:
     assert window.platform.count() == 4
     assert [window.platform.itemData(i) for i in range(window.platform.count())] == [
         "pinterest", "x", "instagram", "youtube",
@@ -160,7 +161,7 @@ def test_platform_combo_uses_registry_icons_and_disables_youtube(window: MainWin
 
     youtube_item = window.platform.model().item(3)
     assert youtube_item is not None
-    assert not (youtube_item.flags() & Qt.ItemFlag.ItemIsEnabled)
+    assert youtube_item.flags() & Qt.ItemFlag.ItemIsEnabled
 
     instagram_item = window.platform.model().item(2)
     assert instagram_item is not None
@@ -223,51 +224,51 @@ def test_pinterest_user_and_board_forms_keep_source_fields_and_legacy_modes(wind
     assert window.mode.currentData() == "current_page"
 
 
-def test_reserved_platform_cannot_start_task(window: MainWindow, monkeypatch: pytest.MonkeyPatch) -> None:
-    messages: list[str] = []
-    monkeypatch.setattr(
-        main_window_module.QMessageBox,
-        "warning",
-        staticmethod(lambda _parent, _title, message: messages.append(message)),
+def test_youtube_platform_shows_url_and_quality_controls(window: MainWindow) -> None:
+    window.platform.setCurrentIndex(3)
+
+    assert window.platform.currentData() == "youtube"
+    assert window.mode.currentData() == "auto"
+    assert not window.keyword.isHidden()
+    assert not window.video_quality.isHidden()
+    assert "YouTube" in window.source_label.text()
+
+
+def _wheel_combo(combo, delta: int) -> QWheelEvent:
+    center = combo.rect().center()
+    event = QWheelEvent(
+        QPointF(center), QPointF(combo.mapToGlobal(center)), QPoint(), QPoint(0, delta),
+        Qt.MouseButton.NoButton, Qt.KeyboardModifier.NoModifier,
+        Qt.ScrollPhase.ScrollUpdate, False,
     )
-
-    config = TaskConfig(
-        "",
-        1,
-        Path(window.database.path).parent,
-        platform="youtube",
-        collection_mode="author",
-        source_identifier="future-account",
-    )
-    window._start_config(config)
-
-    assert messages == ["该平台正在开发中，当前版本暂不支持实际采集。"]
-    assert window.worker is None
+    QApplication.sendEvent(combo, event)
+    return event
 
 
-def test_reserved_platform_cannot_start_queue(window: MainWindow, monkeypatch: pytest.MonkeyPatch) -> None:
-    messages: list[str] = []
-    monkeypatch.setattr(
-        main_window_module.QMessageBox,
-        "warning",
-        staticmethod(lambda _parent, _title, message: messages.append(message)),
-    )
-    task = QueueTask(
-        TaskConfig(
-            "",
-            1,
-            Path(window.database.path).parent,
-            platform="youtube",
-            collection_mode="search",
-            source_identifier="future videos",
-        )
-    )
-    window.queue_tasks[:] = [task]
+def test_configuration_combos_ignore_wheel_without_losing_normal_selection(window: MainWindow) -> None:
+    window.platform.setCurrentIndex(window.platform.findData("youtube"))
+    window.video_quality.setCurrentIndex(window.video_quality.findData("best"))
+    window.youtube_cookie_source.setCurrentIndex(window.youtube_cookie_source.findData("firefox"))
 
-    window.start_queue_tasks()
+    for combo in (
+        window.platform, window.mode, window.search_scope, window.media_type,
+        window.video_quality, window.youtube_cookie_source,
+    ):
+        assert isinstance(combo, NoWheelComboBox)
 
-    assert messages == ["该平台正在开发中，当前版本暂不支持实际采集。"]
-    assert window.queue_runner is None
+    assert not _wheel_combo(window.video_quality, 120).isAccepted()
+    assert not _wheel_combo(window.video_quality, -120).isAccepted()
+    assert window.video_quality.currentData() == "best"
+    assert not _wheel_combo(window.youtube_cookie_source, -120).isAccepted()
+    assert window.youtube_cookie_source.currentData() == "firefox"
+
+    # Wheel suppression only affects scrolling. The standard selection API and
+    # popup remain available for ordinary click/keyboard selection.
+    window.video_quality.showPopup()
+    assert window.video_quality.view().isVisible()
+    window.video_quality.hidePopup()
+    window.video_quality.setCurrentIndex(window.video_quality.findData("720"))
+    assert window.video_quality.currentData() == "720"
 
 
 def test_control_handlers_call_engine_and_follow_confirmed_states(window: MainWindow) -> None:

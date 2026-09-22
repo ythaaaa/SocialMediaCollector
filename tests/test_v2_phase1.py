@@ -90,9 +90,9 @@ def test_platform_registry_declares_current_and_reserved_capabilities() -> None:
 
     youtube = get_platform_spec("youtube")
     assert youtube is not None
-    assert youtube.enabled is False
-    assert youtube.collection_modes == ("search", "channel", "single_video")
-    assert youtube.media_types == ("video", "thumbnail", "video_thumbnail")
+    assert youtube.enabled is True
+    assert youtube.collection_modes == ("auto", "single_video", "playlist", "channel")
+    assert youtube.media_types == ("video", "audio", "thumbnail")
 
 
 def test_platform_resources_are_source_and_pyinstaller_inputs() -> None:
