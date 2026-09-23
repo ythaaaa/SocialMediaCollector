@@ -3,9 +3,10 @@ from __future__ import annotations
 import hashlib
 import io
 import inspect
+import logging
 import time
 from dataclasses import replace
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from threading import Event
 from typing import Callable
@@ -14,7 +15,10 @@ from urllib.parse import urlsplit, urlunsplit
 import httpx
 from PIL import Image, UnidentifiedImageError
 
-from src.browser import BrowserSessionManager, ImageCandidate, InstagramCollector, PinterestCollector, PinterestVideoSource, XCollector
+from src.browser import (
+    BrowserSessionManager, ImageCandidate, InstagramCollector, PinterestCollector, PinterestVideoSource,
+    XCollector, YouTubeBrowserSearchError, YouTubeShortsBrowserCollector,
+)
 from src.models import DownloadRecord, TaskConfig, TaskStats
 from src.downloader.hls import HLSDownloadCancelled, HLSDownloadError, HLSDownloader
 from src.downloader.dash import DASHDownloadCancelled, DASHDownloadError, DASHDownloader
@@ -38,11 +42,16 @@ from src.utils.pinterest import (
     pinterest_user_url,
 )
 from src.utils.x import x_author_media_url, x_search_url
-from src.utils.youtube import youtube_url_kind
+from src.utils.youtube import youtube_url_kind, youtube_video_id
 from src.adapters.youtube import YouTubeAdapter, YouTubeCancelled, YouTubeError
 
 
+logger = logging.getLogger(__name__)
+
+
 class DownloadEngine:
+    MAX_YOUTUBE_SEARCH_CANDIDATES = 150
+    YOUTUBE_SEARCH_EXPANSION_STEP = 20
     def __init__(
         self,
         config: TaskConfig,
@@ -189,9 +198,12 @@ class DownloadEngine:
         elif platform == "x":
             task_name = "x_首页推荐流"
         elif platform == "youtube":
-            kind = youtube_url_kind(self.config.canonical_source_value)
-            self.config = replace(self.config, source_identifier=self.config.canonical_source_value, source_page_url=self.config.canonical_source_value)
-            task_name = f"youtube_{kind}"
+            if mode == "youtube_search":
+                task_name = "youtube_search"
+            else:
+                kind = youtube_url_kind(self.config.canonical_source_value)
+                self.config = replace(self.config, source_identifier=self.config.canonical_source_value, source_page_url=self.config.canonical_source_value)
+                task_name = f"youtube_{kind}"
         else:
             task_name = {
                 "search": self.config.keyword,
@@ -369,6 +381,8 @@ class DownloadEngine:
 
     def _run_youtube(self) -> Path:
         """Process yt-dlp entries sequentially so target counts mean saved files."""
+        if self.config.canonical_collection_mode() == "youtube_search":
+            return self._run_youtube_search()
         assert self.task_dir and self.task_output_dir
         store = TaskStore(self.task_dir, self.config)
         self.database.start_task(self.config, self.task_output_dir)
@@ -393,61 +407,10 @@ class DownloadEngine:
                     self._emit()
                     continue
                 self._emit(f"正在下载：{candidate.post_text or candidate.post_id}")
-                record = DownloadRecord(
-                    "", self.config.source_identifier, candidate.post_url, candidate.media_url,
-                    collection_mode=self.config.canonical_collection_mode(), source_page_url=self.config.source_page_url,
-                    platform="youtube", author_username=candidate.author_username, post_url=candidate.post_url,
-                    media_type=self.config.canonical_media_type(), media_url=candidate.media_url,
-                    duration=candidate.duration, video_width=candidate.video_width, video_height=candidate.video_height,
-                    post_id=candidate.post_id, post_text=candidate.post_text, thumbnail_url=candidate.thumbnail_url,
-                    source_type=candidate.source_type, collected_at=datetime.now().isoformat(timespec="seconds"),
-                )
                 try:
-                    media_type = self.config.canonical_media_type()
-                    output_dir = self.task_dir / ("images" if media_type == "thumbnail" else "videos")
-                    result = adapter.download(
-                        candidate, output_dir, self.stats.downloaded + 1, media_type=media_type,
-                        quality=self.config.video_quality, audio_format=self.config.audio_format,
-                        should_stop=self.stop_event.is_set, should_pause=self._wait_if_paused, on_log=self.on_log,
-                        cookie_source=self.config.youtube_cookie_source,
-                        browser_profile=self.config.youtube_browser_profile, cookie_file=self.config.youtube_cookie_file,
-                    )
-                    if self.stop_event.is_set():
-                        raise YouTubeCancelled("用户已停止任务")
-                    digest = adapter.file_hash(result.path)
-                    if digest in known or digest in self._current_task_hashes or (
-                        self.config.skip_history_duplicates and self.database.find_hash_duplicate(digest, result.path, require_local_file=False)
-                    ):
-                        result.path.unlink(missing_ok=True)
-                        self._record_duplicate("已跳过内容重复 YouTube 视频")
-                        record.status, record.reason, record.content_hash = "skipped", "内容重复", digest
-                        store.append(record)
-                        continue
-                    relative = result.path.relative_to(self.task_dir).as_posix()
-                    info = result.info
-                    record.filename, record.file_size, record.image_format = relative, result.path.stat().st_size, result.path.suffix.lstrip(".").upper()
-                    record.content_hash, record.status = digest, "downloaded"
-                    record.downloaded_at = datetime.now().isoformat(timespec="seconds")
-                    record.duration = info.get("duration") or record.duration
-                    record.video_width = info.get("width") or record.video_width
-                    record.video_height = info.get("height") or record.video_height
-                    record.bitrate = info.get("tbr") or record.bitrate
-                    record.thumbnail_url = info.get("thumbnail") or record.thumbnail_url
-                    store.append(record)
-                    known.add(digest); self._current_task_hashes.add(digest); self.stats.downloaded += 1
-                    self.database.register_media(candidate, self.config.canonical_source_value, digest, result.path, self.config.task_id)
-                    self.on_log(f"已保存 {relative}")
-                    self.on_log(f"下载统计：成功保存 {self.stats.downloaded}/{self.config.target_count}")
-                    self._emit()
-                    self._sleep_interval()
+                    self._download_youtube_candidate(adapter, candidate, store, known)
                 except YouTubeCancelled:
                     break
-                except (YouTubeError, OSError, ValueError) as exc:
-                    self.stats.failed += 1
-                    record.status, record.reason = "failed", str(exc)
-                    store.append(record)
-                    self.on_log(f"YouTube 下载失败，跳过后续继续：{exc}")
-                    self._emit()
             status = "已停止" if self.stop_event.is_set() else ("任务完成" if self.stats.downloaded >= self.config.target_count else "采集结束（YouTube 已无更多条目）")
             store.complete(self.stats, self.stop_event.is_set())
             self.database.finish_task(self.config, self.stats, "stopped" if self.stop_event.is_set() else "completed", task_output_dir=self.task_output_dir)
@@ -460,6 +423,390 @@ class DownloadEngine:
                 self._emit("已停止")
                 return self.task_dir
             raise
+
+    @staticmethod
+    def _youtube_search_budget(target_count: int) -> int:
+        multiplier = 3 if target_count <= 20 else 2
+        return min(DownloadEngine.MAX_YOUTUBE_SEARCH_CANDIDATES, max(20, target_count * multiplier))
+
+    def _run_youtube_search(self) -> Path:
+        """Search each term through yt-dlp, then consume candidates round-robin."""
+        assert self.task_dir and self.task_output_dir
+        store = TaskStore(self.task_dir, self.config)
+        self.database.start_task(self.config, self.task_output_dir)
+        adapter = YouTubeAdapter()
+        known = store.known_hashes()
+        self._current_task_hashes.update(known)
+        keywords = self.config.youtube_search_keywords
+        initial_budget = self._youtube_search_budget(self.config.target_count)
+        pools: dict[str, list[ImageCandidate]] = {}
+        requested = {keyword: initial_budget for keyword in keywords}
+        result_counts = {keyword: 0 for keyword in keywords}
+        # Shorts/Videos first use YouTube's type-filtered search source.  A
+        # filtered result set can legitimately be much smaller than a task's
+        # target, so it must not terminate the whole search: its exhausted
+        # keyword switches once to normal ytsearch and keeps the same type
+        # check during metadata enrichment.
+        active_content_types = {keyword: self.config.youtube_search_content_type for keyword in keywords}
+        active_search_sources = {
+            keyword: "browser" if self.config.youtube_search_source == "browser_shorts" else "ytdlp"
+            for keyword in keywords
+        }
+        source_exhausted = {keyword: False for keyword in keywords}
+        fallback_started: set[str] = set()
+        search_seen_keys: set[tuple[str, str]] = set()
+        search_seen_keys_by_keyword = {keyword: set() for keyword in keywords}
+        reached_candidate_cap = False
+        browser_search: YouTubeShortsBrowserCollector | None = None
+
+        def browser_collector() -> YouTubeShortsBrowserCollector:
+            nonlocal browser_search
+            if browser_search is not None:
+                return browser_search
+            browser_search = YouTubeShortsBrowserCollector(self.profile_dir, self.on_log)
+            try:
+                if self.browser_manager and self.browser_manager.is_running() and self.browser_manager.endpoint:
+                    browser_search.connect_over_cdp(self.browser_manager.endpoint)
+                else:
+                    browser_search.open()
+            except Exception as exc:
+                browser_search.close()
+                browser_search = None
+                raise YouTubeBrowserSearchError(f"无法启动浏览器辅助 Shorts 搜索：{exc}") from exc
+            return browser_search
+
+        def fetch(keyword: str, limit: int, *, expanding: bool) -> int:
+            """Fetch a larger discovery prefix and append only new video ids."""
+            nonlocal reached_candidate_cap
+            if self.stop_event.is_set():
+                return 0
+            self._wait_if_paused()
+            if self.stop_event.is_set():
+                return 0
+            try:
+                if active_search_sources[keyword] == "browser":
+                    candidates = browser_collector().search(
+                        keyword, limit, should_stop=self.stop_event.is_set,
+                        should_pause=self._wait_if_paused, max_scrolls=self.config.max_scrolls,
+                    )
+                else:
+                    candidates = list(adapter.search(
+                        keyword, limit, content_type=active_content_types[keyword],
+                        cookie_source=self.config.youtube_cookie_source,
+                        browser_profile=self.config.youtube_browser_profile,
+                        cookie_file=self.config.youtube_cookie_file,
+                    ))
+            except (YouTubeError, YouTubeBrowserSearchError) as exc:
+                label = "浏览器辅助 Shorts 搜索" if active_search_sources[keyword] == "browser" else "YouTube 关键词搜索"
+                self.on_log(f"{label}失败，继续其他关键词：{keyword} - {exc}")
+                result_counts[keyword] = 0
+                source_exhausted[keyword] = True
+                return 0
+            result_counts[keyword] = len(candidates)
+            if len(candidates) < limit:
+                source_exhausted[keyword] = True
+            pool = pools.setdefault(keyword, [])
+            new_candidates: list[ImageCandidate] = []
+            for candidate in candidates:
+                keys = self._current_candidate_keys(candidate)
+                # Missing identity is retained for the normal candidate path,
+                # where it is skipped without ever entering a seen set.
+                if keys and any(key in search_seen_keys_by_keyword[keyword] for key in keys):
+                    continue
+                new_global_keys = keys - search_seen_keys
+                if new_global_keys and len(search_seen_keys) >= self.MAX_YOUTUBE_SEARCH_CANDIDATES:
+                    reached_candidate_cap = True
+                    break
+                if keys:
+                    search_seen_keys_by_keyword[keyword].update(keys)
+                    search_seen_keys.update(keys)
+                new_candidates.append(candidate)
+            pool.extend(new_candidates)
+            if expanding:
+                prefix = "浏览器辅助 Shorts 搜索" if active_search_sources[keyword] == "browser" else "搜索"
+                self.on_log(f"{prefix}候选扩展至 {limit}，新增 {len(new_candidates)} 个唯一视频（{keyword}）")
+            else:
+                if active_search_sources[keyword] == "browser":
+                    self.on_log(f"YouTube Shorts 浏览器辅助搜索发现 {len(new_candidates)} 个候选（{keyword}）")
+                elif active_content_types[keyword] == "shorts":
+                    self.on_log(f"YouTube Shorts 精确搜索发现 {len(new_candidates)} 个候选（{keyword}）")
+                elif active_content_types[keyword] == "video":
+                    self.on_log(f"YouTube 普通视频精确搜索发现 {len(new_candidates)} 个候选（{keyword}）")
+                else:
+                    self.on_log(f"YouTube 搜索发现 {len(new_candidates)} 个候选（{keyword}）")
+            if expanding and not new_candidates:
+                # A larger prefix that contributes no new identity cannot
+                # make this source useful again.  Let a type-filtered source
+                # fall through to generic ytsearch, rather than repeatedly
+                # requesting the same prefix through the global cap.
+                source_exhausted[keyword] = True
+            for index, candidate in enumerate(new_candidates[:20], start=1):
+                keys = self._current_candidate_keys(candidate)
+                dedupe_key = next(iter(keys))[1] if keys else "<missing>"
+                logger.debug(
+                    "YouTube search candidate [%d] id=%s title=%s url=%s dedupe=%s",
+                    index, candidate.post_id, candidate.post_text, candidate.post_url or candidate.media_url, dedupe_key,
+                )
+            return len(new_candidates)
+
+        try:
+            for keyword in keywords:
+                if self.stop_event.is_set():
+                    break
+                source_type = active_content_types[keyword]
+                source = {
+                    "all": "通用 ytsearchN",
+                    "shorts": "Shorts 精确搜索 URL",
+                    "video": "普通视频精确搜索 URL",
+                }[source_type] if active_search_sources[keyword] == "ytdlp" else "浏览器辅助 Shorts 搜索"
+                content_label = {"all": "全部", "shorts": "Shorts", "video": "普通视频"}[source_type]
+                strict_label = "开启" if self.config.youtube_search_strict_shorts else "关闭"
+                self.on_log(
+                    f"YouTube 搜索配置：内容类型={content_label}；严格 Shorts={strict_label}；"
+                    f"搜索源={source}"
+                )
+                self._emit(f"YouTube 关键词搜索：{keyword}（首批 {initial_budget} 个候选）")
+                fetch(keyword, initial_budget, expanding=False)
+
+            positions = {keyword: 0 for keyword in keywords}
+            while not self.stop_event.is_set() and self.stats.downloaded < self.config.target_count:
+                made_progress = False
+                for keyword in keywords:
+                    if self.stop_event.is_set() or self.stats.downloaded >= self.config.target_count:
+                        break
+                    self._wait_if_paused()
+                    if self.stop_event.is_set():
+                        break
+                    candidates = pools.get(keyword, [])
+                    position = positions[keyword]
+                    if position >= len(candidates):
+                        continue
+                    candidate = candidates[position]
+                    positions[keyword] += 1
+                    made_progress = True
+                    keys = self._current_candidate_keys(candidate)
+                    if not keys:
+                        self.stats.skipped += 1
+                        self.on_log(f"YouTube 搜索候选缺少可识别 video_id，已跳过：{candidate.post_url or candidate.media_url}")
+                        self._emit()
+                        continue
+                    if any(key in self._current_task_candidate_keys for key in keys):
+                        self.stats.skipped += 1
+                        self._record_duplicate("已跳过当前任务重复 YouTube 搜索视频")
+                        self._emit()
+                        continue
+                    self._current_task_candidate_keys.update(keys)
+                    self.stats.discovered += 1
+                    self._emit()
+                    if self.config.skip_history_duplicates and self.database.find_duplicate(candidate, self.config.canonical_source_value, require_local_file=False):
+                        self.stats.skipped += 1
+                        self._record_duplicate("已跳过历史重复 YouTube 搜索视频")
+                        self._emit()
+                        continue
+                    try:
+                        candidate = self._enrich_youtube_search_candidate(adapter, candidate)
+                    except YouTubeError as exc:
+                        self.stats.skipped += 1
+                        self.on_log(f"YouTube 搜索候选 metadata 读取失败，已跳过：{candidate.post_id} - {exc}")
+                        self._emit()
+                        continue
+                    filter_reason = self._youtube_search_filter_reason(candidate)
+                    if filter_reason:
+                        self.stats.skipped += 1
+                        self.on_log(f"YouTube 搜索候选{filter_reason}，已跳过：{candidate.post_id}")
+                        self._emit()
+                        continue
+                    self._emit(f"正在下载：[{self.stats.downloaded + 1}] {candidate.post_text or candidate.post_id}")
+                    try:
+                        self._download_youtube_candidate(adapter, candidate, store, known)
+                    except YouTubeCancelled:
+                        break
+                if made_progress:
+                    continue
+                if reached_candidate_cap or len(search_seen_keys) >= self.MAX_YOUTUBE_SEARCH_CANDIDATES:
+                    reached_candidate_cap = True
+                    break
+                # Once a type-filtered source is genuinely exhausted, use
+                # generic ytsearch as a second discovery source.  It shares
+                # search_seen_keys with the first source, while the existing
+                # metadata media_type check remains the safety gate.
+                switched = 0
+                for keyword in keywords:
+                    if self.stop_event.is_set() or self.stats.downloaded >= self.config.target_count:
+                        break
+                    if (
+                        source_exhausted[keyword]
+                        and active_content_types[keyword] != "all"
+                        and keyword not in fallback_started
+                        and not self.config.youtube_search_strict_shorts
+                    ):
+                        kind = "Shorts" if active_content_types[keyword] == "shorts" else "普通视频"
+                        self.on_log(f"{kind} 精确搜索候选已耗尽，正在使用通用 YouTube 搜索继续补充{kind}...（{keyword}）")
+                        fallback_started.add(keyword)
+                        active_search_sources[keyword] = "ytdlp"
+                        active_content_types[keyword] = "all"
+                        source_exhausted[keyword] = False
+                        requested[keyword] = initial_budget
+                        result_counts[keyword] = 0
+                        switched += fetch(keyword, requested[keyword], expanding=False)
+                if switched:
+                    continue
+
+                expandable = [
+                    keyword for keyword in keywords
+                    if not source_exhausted[keyword]
+                    and result_counts.get(keyword, 0) >= requested[keyword]
+                    and requested[keyword] < self.MAX_YOUTUBE_SEARCH_CANDIDATES
+                ]
+                if not expandable:
+                    break
+                self.on_log("当前候选不足，继续获取更多 YouTube 搜索结果...")
+                added = 0
+                for keyword in expandable:
+                    if self.stop_event.is_set() or len(search_seen_keys) >= self.MAX_YOUTUBE_SEARCH_CANDIDATES:
+                        reached_candidate_cap = len(search_seen_keys) >= self.MAX_YOUTUBE_SEARCH_CANDIDATES
+                        break
+                    requested[keyword] = min(
+                        self.MAX_YOUTUBE_SEARCH_CANDIDATES,
+                        requested[keyword] + self.YOUTUBE_SEARCH_EXPANSION_STEP,
+                    )
+                    added_now = fetch(keyword, requested[keyword], expanding=True)
+                    added += added_now
+                if not added:
+                    # fetch() marks a source exhausted when an expanded
+                    # prefix contains no new identity.  Loop once more so a
+                    # filtered source can activate its generic fallback.
+                    continue
+            status = "已停止" if self.stop_event.is_set() else (
+                "任务完成" if self.stats.downloaded >= self.config.target_count
+                else "采集结束（YouTube Shorts 精确搜索候选不足，已达到安全上限）"
+                if self.config.youtube_search_strict_shorts and reached_candidate_cap
+                else "采集结束（YouTube Shorts 精确搜索候选不足）"
+                if self.config.youtube_search_strict_shorts
+                else "采集结束（YouTube 搜索候选已达到安全上限，未找到足够符合条件的视频）"
+                if reached_candidate_cap
+                else "采集结束（YouTube 搜索结果已耗尽）"
+            )
+            store.complete(self.stats, self.stop_event.is_set())
+            self.database.finish_task(self.config, self.stats, "stopped" if self.stop_event.is_set() else "completed", task_output_dir=self.task_output_dir)
+            self._emit(status)
+            return self.task_dir
+        except Exception as exc:
+            store.complete(self.stats, self.stop_event.is_set(), str(exc))
+            self.database.finish_task(self.config, self.stats, "stopped" if self.stop_event.is_set() else "failed", str(exc), self.task_output_dir)
+            if self.stop_event.is_set():
+                self._emit("已停止")
+                return self.task_dir
+            raise
+        finally:
+            if browser_search is not None:
+                browser_search.close()
+
+    def _enrich_youtube_search_candidate(self, adapter: YouTubeAdapter, candidate: ImageCandidate) -> ImageCandidate:
+        needs_metadata = (
+            self.config.youtube_search_content_type != "all"
+            or self.config.youtube_search_max_duration > 0
+            or self.config.youtube_search_date_range != "any"
+        )
+        if not needs_metadata:
+            return candidate
+        info = adapter.metadata(
+            candidate, cookie_source=self.config.youtube_cookie_source,
+            browser_profile=self.config.youtube_browser_profile,
+            cookie_file=self.config.youtube_cookie_file,
+        )
+        upload_date = str(info.get("upload_date") or candidate.posted_at or "")
+        if not upload_date and info.get("timestamp"):
+            upload_date = datetime.fromtimestamp(float(info["timestamp"]), tz=timezone.utc).strftime("%Y%m%d")
+        return replace(
+            candidate,
+            duration=info.get("duration") if info.get("duration") is not None else candidate.duration,
+            posted_at=upload_date,
+            post_text=str(info.get("title") or candidate.post_text),
+            thumbnail_url=str(info.get("thumbnail") or candidate.thumbnail_url),
+            content_type=str(info.get("media_type") or candidate.content_type or ""),
+        )
+
+    def _youtube_search_filter_reason(self, candidate: ImageCandidate) -> str:
+        requested_type = self.config.youtube_search_content_type
+        is_short = candidate.content_type == "short"
+        if requested_type == "shorts" and not is_short:
+            return "类型不符合（普通视频）" if candidate.content_type == "video" else "类型无法确认"
+        if requested_type == "video" and is_short:
+            return "类型不符合（Shorts）"
+        if requested_type == "video" and candidate.content_type != "video":
+            return "类型无法确认"
+        max_duration = self.config.youtube_search_max_duration
+        if max_duration and candidate.duration is not None and candidate.duration > max_duration:
+            return "时长不符合"
+        date_range = self.config.youtube_search_date_range
+        if date_range == "any" or not candidate.posted_at:
+            return ""
+        try:
+            uploaded = datetime.strptime(candidate.posted_at[:8], "%Y%m%d").replace(tzinfo=timezone.utc)
+        except ValueError:
+            return ""
+        days = {"1d": 1, "7d": 7, "30d": 30, "365d": 365}[date_range]
+        return "" if uploaded >= datetime.now(timezone.utc) - timedelta(days=days) else "发布时间不符合"
+
+    def _download_youtube_candidate(self, adapter: YouTubeAdapter, candidate: ImageCandidate, store: TaskStore, known: set[str]) -> None:
+        assert self.task_dir
+        record = DownloadRecord(
+            "", self.config.source_identifier, candidate.post_url, candidate.media_url,
+            collection_mode=self.config.canonical_collection_mode(), source_page_url=self.config.source_page_url,
+            platform="youtube", author_username=candidate.author_username, post_url=candidate.post_url,
+            media_type=self.config.canonical_media_type(), media_url=candidate.media_url,
+            duration=candidate.duration, video_width=candidate.video_width, video_height=candidate.video_height,
+            post_id=candidate.post_id, post_text=candidate.post_text, thumbnail_url=candidate.thumbnail_url,
+            source=candidate.source, source_type=candidate.source_type, collected_at=datetime.now().isoformat(timespec="seconds"),
+        )
+        try:
+            media_type = self.config.canonical_media_type()
+            output_dir = self.task_dir / ("images" if media_type == "thumbnail" else "videos")
+            result = adapter.download(
+                candidate, output_dir, self.stats.downloaded + 1, media_type=media_type,
+                quality=self.config.video_quality, audio_format=self.config.audio_format,
+                should_stop=self.stop_event.is_set, should_pause=self._wait_if_paused, on_log=self.on_log,
+                cookie_source=self.config.youtube_cookie_source,
+                browser_profile=self.config.youtube_browser_profile, cookie_file=self.config.youtube_cookie_file,
+            )
+            if self.stop_event.is_set():
+                raise YouTubeCancelled("用户已停止任务")
+            digest = adapter.file_hash(result.path)
+            if digest in known or digest in self._current_task_hashes or (
+                self.config.skip_history_duplicates and self.database.find_hash_duplicate(digest, result.path, require_local_file=False)
+            ):
+                result.path.unlink(missing_ok=True)
+                self.stats.skipped += 1
+                self._record_duplicate("已跳过内容重复 YouTube 视频")
+                record.status, record.reason, record.content_hash = "skipped", "内容重复", digest
+                store.append(record)
+                return
+            relative = result.path.relative_to(self.task_dir).as_posix()
+            info = result.info
+            record.filename, record.file_size, record.image_format = relative, result.path.stat().st_size, result.path.suffix.lstrip(".").upper()
+            record.content_hash, record.status = digest, "downloaded"
+            record.downloaded_at = datetime.now().isoformat(timespec="seconds")
+            record.duration = info.get("duration") or record.duration
+            record.video_width = info.get("width") or record.video_width
+            record.video_height = info.get("height") or record.video_height
+            record.bitrate = info.get("tbr") or record.bitrate
+            record.thumbnail_url = info.get("thumbnail") or record.thumbnail_url
+            store.append(record)
+            known.add(digest); self._current_task_hashes.add(digest); self.stats.downloaded += 1
+            self.database.register_media(candidate, self.config.canonical_source_value, digest, result.path, self.config.task_id)
+            self.on_log(f"已保存 {relative}")
+            self.on_log(f"下载统计：成功保存 {self.stats.downloaded}/{self.config.target_count}")
+            self._emit()
+            self._sleep_interval()
+        except YouTubeCancelled:
+            raise
+        except (YouTubeError, OSError, ValueError) as exc:
+            self.stats.failed += 1
+            record.status, record.reason = "failed", str(exc)
+            store.append(record)
+            self.on_log(f"YouTube 下载失败，跳过后续继续：{exc}")
+            self._emit()
 
     def _on_found(self, count: int) -> None:
         self.stats.discovered = count; self._emit()
@@ -514,6 +861,22 @@ class DownloadEngine:
 
     def _current_candidate_keys(self, candidate: ImageCandidate) -> set[tuple[str, str]]:
         platform = self.config.canonical_platform()
+        if platform == "youtube":
+            # Stripping a watch URL query makes every /watch?v=... URL become
+            # the same /watch path. YouTube task de-duplication must use only
+            # the canonical video id, never that query-free URL.
+            raw_identity = str(getattr(candidate, "media_identity", "") or getattr(candidate, "post_id", "") or "")
+            video_id = youtube_video_id(f"https://youtu.be/{raw_identity}") if raw_identity else ""
+            if not video_id:
+                for value in (
+                    getattr(candidate, "post_url", ""),
+                    getattr(candidate, "media_url", ""),
+                    getattr(candidate, "image_url", ""),
+                ):
+                    video_id = youtube_video_id(str(value or ""))
+                    if video_id:
+                        break
+            return {("identity", f"youtube|{video_id}")} if video_id else set()
         keys: set[tuple[str, str]] = set()
         identity = str(getattr(candidate, "media_identity", "") or "")
         if identity:

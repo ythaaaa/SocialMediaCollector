@@ -20,6 +20,7 @@ MODE_LABELS = {
     "channel": "频道",
     "single_video": "单条视频",
     "playlist": "播放列表",
+    "youtube_search": "关键词搜索",
 }
 
 MEDIA_TYPE_LABELS = {
@@ -80,7 +81,7 @@ PLATFORM_REGISTRY: dict[str, PlatformSpec] = {
         label="YouTube",
         icon="icons/platforms/youtube.svg",
         enabled=True,
-        collection_modes=("auto", "single_video", "playlist", "channel"),
+        collection_modes=("auto", "single_video", "playlist", "channel", "youtube_search"),
         media_types=("video", "audio", "thumbnail"),
         default_mode="auto",
         default_media_type="video",

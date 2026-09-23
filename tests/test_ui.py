@@ -10,7 +10,7 @@ import pytest
 from PIL import Image
 from PySide6.QtCore import QItemSelectionModel, QPoint, QPointF, Qt
 from PySide6.QtGui import QWheelEvent
-from PySide6.QtWidgets import QApplication, QFrame, QLabel
+from PySide6.QtWidgets import QApplication, QFrame, QLabel, QTextEdit
 
 from src.models import TaskConfig, TaskStats
 from src.ui import main_window as main_window_module
@@ -66,6 +66,21 @@ def _new_task_card_titles(window: MainWindow) -> list[str]:
         if title:
             titles.append(title)
     return titles
+
+
+def _new_task_card(window: MainWindow, title: str) -> QFrame:
+    page = window.tabs.widget(0)
+    assert page is not None
+    content = page.widget()
+    assert content is not None and content.layout() is not None
+    for index in range(content.layout().count()):
+        widget = content.layout().itemAt(index).widget()
+        if isinstance(widget, QFrame) and any(
+            label.text() == title and label.objectName() == "cardTitle"
+            for label in widget.findChildren(QLabel)
+        ):
+            return widget
+    raise AssertionError(f"{title} 卡片未找到")
 
 
 def test_new_task_cards_follow_the_requested_vertical_order(window: MainWindow) -> None:
@@ -232,6 +247,39 @@ def test_youtube_platform_shows_url_and_quality_controls(window: MainWindow) -> 
     assert not window.keyword.isHidden()
     assert not window.video_quality.isHidden()
     assert "YouTube" in window.source_label.text()
+
+
+def test_youtube_search_form_uses_no_wheel_filters_and_normalizes_keywords(window: MainWindow) -> None:
+    window.platform.setCurrentIndex(window.platform.findData("youtube"))
+    window.mode.setCurrentIndex(window.mode.findData("youtube_search"))
+    window.youtube_search_keywords.setPlainText("car restoration\n\nCAR restoration\nhouse renovation")
+    window.youtube_search_max_duration.setCurrentIndex(window.youtube_search_max_duration.findData(300))
+    window.youtube_search_date_range.setCurrentIndex(window.youtube_search_date_range.findData("30d"))
+
+    assert window.keyword.isHidden()
+    assert not window.youtube_search_keywords.isHidden()
+    assert window.youtube_search_keywords in _new_task_card(window, "目标内容").findChildren(QTextEdit)
+    for combo in (
+        window.youtube_search_sort, window.youtube_search_content_type,
+        window.youtube_search_max_duration, window.youtube_search_date_range,
+    ):
+        assert isinstance(combo, NoWheelComboBox)
+    assert not _wheel_combo(window.youtube_search_max_duration, -120).isAccepted()
+    assert window.youtube_search_max_duration.currentData() == 300
+    config = window._task_config_from_form()
+    assert config.youtube_search_keywords == ("car restoration", "house renovation")
+    assert config.youtube_search_date_range == "30d"
+
+    window.youtube_search_content_type.setCurrentIndex(window.youtube_search_content_type.findData("shorts"))
+    assert window.youtube_search_content_type.currentData() == "shorts"
+    assert window.youtube_search_max_duration.isHidden()
+    assert not window.youtube_search_strict_shorts.isHidden()
+    window.youtube_search_strict_shorts.setChecked(True)
+    window.youtube_search_source.setCurrentIndex(window.youtube_search_source.findData("browser_shorts"))
+    assert window._task_config_from_form().youtube_search_strict_shorts is True
+    assert window._task_config_from_form().youtube_search_source == "browser_shorts"
+    assert not _wheel_combo(window.youtube_search_content_type, -120).isAccepted()
+    assert window.youtube_search_content_type.currentData() == "shorts"
 
 
 def _wheel_combo(combo, delta: int) -> QWheelEvent:

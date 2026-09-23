@@ -2,10 +2,25 @@
 from __future__ import annotations
 
 import re
+from collections.abc import Iterable
 from urllib.parse import parse_qs, urlparse
 
 
 _VIDEO_ID = re.compile(r"^[A-Za-z0-9_-]{6,}$")
+
+
+def normalize_youtube_search_keywords(value: str | Iterable[object]) -> tuple[str, ...]:
+    """Normalize newline-delimited search terms while preserving their order."""
+    values = value.splitlines() if isinstance(value, str) else value
+    result: list[str] = []
+    seen: set[str] = set()
+    for item in values:
+        keyword = str(item or "").strip()
+        marker = keyword.casefold()
+        if keyword and marker not in seen:
+            seen.add(marker)
+            result.append(keyword)
+    return tuple(result)
 
 
 def youtube_url_kind(value: str) -> str:

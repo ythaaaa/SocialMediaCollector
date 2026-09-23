@@ -9,7 +9,7 @@ from src.utils.x import normalize_x_author
 from src.platforms import get_platform_spec
 from src.utils.instagram import normalize_hashtag
 from src.utils.pinterest import normalize_pinterest_board_url, normalize_pinterest_pin_url, normalize_pinterest_username
-from src.utils.youtube import youtube_url_kind
+from src.utils.youtube import normalize_youtube_search_keywords, youtube_url_kind
 
 
 TASK_STATUSES = frozenset({"pending", "running", "paused", "completed", "failed", "stopped", "interrupted"})
@@ -74,6 +74,13 @@ class TaskConfig:
     youtube_browser_profile: str = "Default"
     youtube_cookie_source: str = "none"
     youtube_cookie_file: str = ""
+    youtube_search_keywords: tuple[str, ...] = ()
+    youtube_search_sort: str = "relevance"
+    youtube_search_content_type: str = "all"
+    youtube_search_strict_shorts: bool = False
+    youtube_search_source: str = "ytdlp"
+    youtube_search_max_duration: int = 0
+    youtube_search_date_range: str = "any"
     # V2 queue fields. Legacy fields above remain the source of truth for V1.
     task_id: str = field(default_factory=lambda: uuid4().hex)
     status: str = "pending"
@@ -102,6 +109,8 @@ class TaskConfig:
         """Unified V2 source field while retaining legacy keyword/source fields."""
         platform = self.canonical_platform()
         collection_mode = self.canonical_collection_mode()
+        if platform == "youtube" and collection_mode == "youtube_search":
+            return "\n".join(self.youtube_search_keywords)
         if platform == "pinterest" and collection_mode == "user":
             return self.username or self.source_identifier or self.keyword
         if platform == "pinterest" and collection_mode == "board":
@@ -190,6 +199,13 @@ class TaskConfig:
             youtube_browser_profile=str(data.get("youtube_browser_profile") or "Default"),
             youtube_cookie_source=cookie_source,
             youtube_cookie_file=str(data.get("youtube_cookie_file") or ""),
+            youtube_search_keywords=normalize_youtube_search_keywords(data.get("youtube_search_keywords") or (source_identifier if platform == "youtube" and collection_mode == "youtube_search" else "")),
+            youtube_search_sort=str(data.get("youtube_search_sort") or "relevance"),
+            youtube_search_content_type=str(data.get("youtube_search_content_type") or "all"),
+            youtube_search_strict_shorts=_as_bool(data.get("youtube_search_strict_shorts"), False),
+            youtube_search_source=str(data.get("youtube_search_source") or "ytdlp"),
+            youtube_search_max_duration=int(data.get("youtube_search_max_duration") or 0),
+            youtube_search_date_range=str(data.get("youtube_search_date_range") or "any"),
             task_id=str(data.get("task_id") or uuid4().hex),
             status=str(data.get("status") or "pending"),
         )
@@ -230,11 +246,29 @@ class TaskConfig:
         elif platform == "youtube":
             if self.canonical_media_type() not in {"video", "audio", "thumbnail"}:
                 raise ValueError("YouTube 下载内容类型无效")
-            if not self.source_value.strip():
-                raise ValueError("YouTube URL 不能为空")
-            kind = youtube_url_kind(self.source_value)
-            if collection_mode != "auto" and kind != collection_mode:
-                raise ValueError("YouTube URL 与选择的采集模式不匹配")
+            if collection_mode == "youtube_search":
+                if not self.youtube_search_keywords:
+                    raise ValueError("请至少输入一个 YouTube 搜索关键词")
+                if self.youtube_search_sort != "relevance":
+                    raise ValueError("当前 yt-dlp 版本只支持可靠的 YouTube 相关度搜索")
+                if self.youtube_search_content_type not in {"all", "shorts", "video"}:
+                    raise ValueError("YouTube 搜索内容类型无效")
+                if self.youtube_search_strict_shorts and self.youtube_search_content_type != "shorts":
+                    raise ValueError("严格 Shorts 搜索仅适用于 Shorts 内容类型")
+                if self.youtube_search_source not in {"ytdlp", "browser_shorts"}:
+                    raise ValueError("YouTube 搜索来源无效")
+                if self.youtube_search_source == "browser_shorts" and self.youtube_search_content_type != "shorts":
+                    raise ValueError("浏览器辅助搜索仅适用于 Shorts 内容类型")
+                if self.youtube_search_max_duration not in {0, 300, 1200}:
+                    raise ValueError("YouTube 视频时长筛选无效")
+                if self.youtube_search_date_range not in {"any", "1d", "7d", "30d", "365d"}:
+                    raise ValueError("YouTube 发布时间筛选无效")
+            else:
+                if not self.source_value.strip():
+                    raise ValueError("YouTube URL 不能为空")
+                kind = youtube_url_kind(self.source_value)
+                if collection_mode != "auto" and kind != collection_mode:
+                    raise ValueError("YouTube URL 与选择的采集模式不匹配")
             if self.video_quality not in {"best", "1080", "720", "480"}:
                 raise ValueError("YouTube 视频质量无效")
             if self.youtube_browser != "chrome":

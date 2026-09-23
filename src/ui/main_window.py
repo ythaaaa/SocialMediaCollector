@@ -34,6 +34,7 @@ from src.ui.input_state import ModeInputState
 from src.ui.resources import app_icon_path, resource_path, set_windows_app_user_model_id, stylesheet
 from src.utils.paths import application_data_directory, browser_profile_directory, profile_directory_for_platform
 from src.utils.instagram import normalize_hashtag
+from src.utils.youtube import normalize_youtube_search_keywords
 from src.version import APP_VERSION
 
 
@@ -330,6 +331,32 @@ class MainWindow(QMainWindow):
         cookie_file_row.addWidget(self.youtube_cookie_file_button)
         self.youtube_cookie_file_widget = QWidget()
         self.youtube_cookie_file_widget.setLayout(cookie_file_row)
+        self.youtube_search_keywords = QTextEdit()
+        self.youtube_search_keywords.setPlaceholderText("每行一个关键词；空行忽略并自动去重")
+        self.youtube_search_keywords.setMinimumHeight(92)
+        self.youtube_search_keywords.setMaximumHeight(130)
+        self.youtube_search_keywords_label = self._field_label("YouTube 搜索关键词")
+        self.youtube_search_sort = NoWheelComboBox()
+        self.youtube_search_sort.addItem("相关度", "relevance")
+        self.youtube_search_sort_label = self._field_label("搜索排序")
+        self.youtube_search_content_type = NoWheelComboBox()
+        for label, value in (("全部", "all"), ("Shorts", "shorts"), ("普通视频", "video")):
+            self.youtube_search_content_type.addItem(label, value)
+        self.youtube_search_content_type_label = self._field_label("内容类型")
+        self.youtube_search_strict_shorts = QCheckBox("严格 Shorts：仅使用 Shorts 精确搜索")
+        self.youtube_search_strict_shorts.setToolTip("候选不足时不使用通用 YouTube 搜索补足")
+        self.youtube_search_source = NoWheelComboBox()
+        self.youtube_search_source.addItem("yt-dlp 精确搜索", "ytdlp")
+        self.youtube_search_source.addItem("浏览器辅助搜索", "browser_shorts")
+        self.youtube_search_source_label = self._field_label("搜索来源")
+        self.youtube_search_max_duration = NoWheelComboBox()
+        for label, value in (("不限", 0), ("5分钟以内", 300), ("20分钟以内", 1200)):
+            self.youtube_search_max_duration.addItem(label, value)
+        self.youtube_search_max_duration_label = self._field_label("视频时长")
+        self.youtube_search_date_range = NoWheelComboBox()
+        for label, value in (("不限", "any"), ("最近24小时", "1d"), ("最近7天", "7d"), ("最近30天", "30d"), ("最近一年", "365d")):
+            self.youtube_search_date_range.addItem(label, value)
+        self.youtube_search_date_range_label = self._field_label("发布时间")
         self.keyword = QLineEdit()
         self.keyword.setMinimumHeight(42)
         self.source_label = self._field_label("搜索关键词")
@@ -589,6 +616,19 @@ class MainWindow(QMainWindow):
         card, layout = self._card("目标内容", "单任务填写一项；批量任务每行填写一个关键词或作者。")
         layout.addWidget(self.source_label)
         layout.addWidget(self.keyword)
+        layout.addWidget(self.youtube_search_keywords_label)
+        layout.addWidget(self.youtube_search_keywords)
+        layout.addWidget(self.youtube_search_sort_label)
+        layout.addWidget(self.youtube_search_sort)
+        layout.addWidget(self.youtube_search_content_type_label)
+        layout.addWidget(self.youtube_search_content_type)
+        layout.addWidget(self.youtube_search_source_label)
+        layout.addWidget(self.youtube_search_source)
+        layout.addWidget(self.youtube_search_strict_shorts)
+        layout.addWidget(self.youtube_search_max_duration_label)
+        layout.addWidget(self.youtube_search_max_duration)
+        layout.addWidget(self.youtube_search_date_range_label)
+        layout.addWidget(self.youtube_search_date_range)
         layout.addWidget(self.search_scope_field)
         layout.addWidget(self.current_page_info)
         self.batch_mode.setObjectName("modeSwitch")
@@ -774,6 +814,7 @@ class MainWindow(QMainWindow):
         self.mode.currentIndexChanged.connect(self._mode_changed)
         self.search_scope.currentIndexChanged.connect(self._search_scope_changed)
         self.youtube_cookie_source.currentIndexChanged.connect(self._update_youtube_cookie_controls)
+        self.youtube_search_content_type.currentIndexChanged.connect(self._update_youtube_search_content_controls)
 
     def _search_scope_changed(self, _index: int) -> None:
         if self.platform.currentData() == "x" and self.mode.currentData() == "search":
@@ -782,6 +823,16 @@ class MainWindow(QMainWindow):
     def _update_youtube_cookie_controls(self, _index: int | None = None) -> None:
         is_file = self.platform.currentData() == "youtube" and self.youtube_cookie_source.currentData() == "file"
         self.youtube_cookie_file_widget.setVisible(is_file)
+
+    def _update_youtube_search_content_controls(self, _index: int | None = None) -> None:
+        is_search = self.platform.currentData() == "youtube" and self.mode.currentData() == "youtube_search"
+        show_duration = is_search and self.youtube_search_content_type.currentData() != "shorts"
+        self.youtube_search_max_duration_label.setVisible(show_duration)
+        self.youtube_search_max_duration.setVisible(show_duration)
+        show_shorts_options = is_search and self.youtube_search_content_type.currentData() == "shorts"
+        self.youtube_search_strict_shorts.setVisible(show_shorts_options)
+        self.youtube_search_source_label.setVisible(show_shorts_options)
+        self.youtube_search_source.setVisible(show_shorts_options)
 
     def _choose_youtube_cookie_file(self) -> None:
         filename, _filter = QFileDialog.getOpenFileName(self, "选择 cookies.txt", self.youtube_cookie_file.text(), "Cookie files (*.txt);;All files (*)")
@@ -872,6 +923,16 @@ class MainWindow(QMainWindow):
         self.youtube_cookie_source_label.setVisible(False)
         self.youtube_cookie_source.setVisible(False)
         self.youtube_cookie_file_widget.setVisible(False)
+        for widget in (
+            self.youtube_search_keywords_label, self.youtube_search_keywords,
+            self.youtube_search_sort_label, self.youtube_search_sort,
+            self.youtube_search_content_type_label, self.youtube_search_content_type,
+            self.youtube_search_source_label, self.youtube_search_source,
+            self.youtube_search_strict_shorts,
+            self.youtube_search_max_duration_label, self.youtube_search_max_duration,
+            self.youtube_search_date_range_label, self.youtube_search_date_range,
+        ):
+            widget.setVisible(False)
         if platform == "instagram":
             author_mode = mode == "author"
             hashtag_mode = mode == "hashtag"
@@ -940,12 +1001,16 @@ class MainWindow(QMainWindow):
             return
 
         if platform == "youtube":
+            search_mode = mode == "youtube_search"
             self.source_label.setText("YouTube URL")
-            self.source_label.setVisible(True)
-            self.keyword.setVisible(True)
-            self.keyword.setEnabled(True)
+            self.source_label.setVisible(not search_mode)
+            self.keyword.setVisible(not search_mode)
+            self.keyword.setEnabled(not search_mode)
             self.keyword.setPlaceholderText("视频、Shorts、Playlist 或频道 URL")
-            self.mode_hint.setText("使用 yt-dlp 下载公开 YouTube 视频；Playlist 和频道会持续处理到成功数量达到目标或条目耗尽。")
+            self.mode_hint.setText(
+                "每个关键词通过 yt-dlp 相关度搜索；搜索结果按关键词轮流处理，直到成功数达到目标或候选耗尽。"
+                if search_mode else "使用 yt-dlp 下载公开 YouTube 视频；Playlist 和频道会持续处理到成功数量达到目标或条目耗尽。"
+            )
             self.only_author.setVisible(False)
             self.only_prompt.setVisible(False)
             self.media_type_label.setVisible(True)
@@ -955,6 +1020,17 @@ class MainWindow(QMainWindow):
             self.youtube_cookie_source_label.setVisible(True)
             self.youtube_cookie_source.setVisible(True)
             self._update_youtube_cookie_controls()
+            for widget in (
+                self.youtube_search_keywords_label, self.youtube_search_keywords,
+                self.youtube_search_sort_label, self.youtube_search_sort,
+                self.youtube_search_content_type_label, self.youtube_search_content_type,
+                self.youtube_search_source_label, self.youtube_search_source,
+                self.youtube_search_strict_shorts,
+                self.youtube_search_max_duration_label, self.youtube_search_max_duration,
+                self.youtube_search_date_range_label, self.youtube_search_date_range,
+            ):
+                widget.setVisible(search_mode)
+            self._update_youtube_search_content_controls()
             self.search_scope_label.setVisible(False)
             self.search_scope.setVisible(False)
             self.search_scope_field.setVisible(False)
@@ -1046,7 +1122,8 @@ class MainWindow(QMainWindow):
             self.batch_mode.blockSignals(False)
         self.batch_mode.setVisible(supported)
         batch_enabled = supported and self.batch_mode.isChecked()
-        self.keyword.setVisible(not batch_enabled)
+        youtube_search = self.platform.currentData() == "youtube" and self.mode.currentData() == "youtube_search"
+        self.keyword.setVisible(not batch_enabled and not youtube_search)
         self.batch_input.setVisible(batch_enabled)
         self.add_queue.setVisible(batch_enabled)
         platform = get_platform_spec(str(self.platform.currentData() or ""))
@@ -1090,6 +1167,7 @@ class MainWindow(QMainWindow):
         platform = str(self.platform.currentData())
         mode = str(self.mode.currentData())
         source_text = self.keyword.text()
+        youtube_keywords = normalize_youtube_search_keywords(self.youtube_search_keywords.toPlainText()) if platform == "youtube" and mode == "youtube_search" else ()
         is_search = mode == "search"
         hashtag = normalize_hashtag(source_text) if platform == "instagram" and mode == "hashtag" else ""
         pinterest_user = source_text if platform == "pinterest" and mode == "user" else ""
@@ -1101,6 +1179,8 @@ class MainWindow(QMainWindow):
             if pinterest_user
             else pinterest_board
             if pinterest_board
+            else "\n".join(youtube_keywords)
+            if platform == "youtube" and mode == "youtube_search"
             else source_text
             if (platform in {"x", "instagram", "youtube"} and mode in {"author", "search", "single_post", "auto", "single_video", "playlist", "channel"})
             or (platform == "pinterest" and mode == "single_post")
@@ -1129,6 +1209,13 @@ class MainWindow(QMainWindow):
             youtube_use_browser_cookies=str(self.youtube_cookie_source.currentData()) == "chrome" if platform == "youtube" else False,
             youtube_cookie_source=str(self.youtube_cookie_source.currentData()) if platform == "youtube" else "none",
             youtube_cookie_file=self.youtube_cookie_file.text().strip() if platform == "youtube" else "",
+            youtube_search_keywords=youtube_keywords,
+            youtube_search_sort=str(self.youtube_search_sort.currentData()) if platform == "youtube" and mode == "youtube_search" else "relevance",
+            youtube_search_content_type=str(self.youtube_search_content_type.currentData()) if platform == "youtube" and mode == "youtube_search" else "all",
+            youtube_search_strict_shorts=self.youtube_search_strict_shorts.isChecked() if platform == "youtube" and mode == "youtube_search" and self.youtube_search_content_type.currentData() == "shorts" else False,
+            youtube_search_source=str(self.youtube_search_source.currentData()) if platform == "youtube" and mode == "youtube_search" and self.youtube_search_content_type.currentData() == "shorts" else "ytdlp",
+            youtube_search_max_duration=int(self.youtube_search_max_duration.currentData()) if platform == "youtube" and mode == "youtube_search" else 0,
+            youtube_search_date_range=str(self.youtube_search_date_range.currentData()) if platform == "youtube" and mode == "youtube_search" else "any",
         )
 
     def _save_root(self) -> Path:

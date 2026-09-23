@@ -52,6 +52,7 @@ class ImageCandidate:
     source_board: str = ""
     source_board_url: str = ""
     source_owner: str = ""
+    content_type: str = ""
 
 
 @dataclass(frozen=True)
