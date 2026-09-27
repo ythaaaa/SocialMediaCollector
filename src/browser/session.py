@@ -358,3 +358,18 @@ class BrowserSessionManager:
         for process in (login_process, collection_process):
             if process and process.poll() is None:
                 self._terminate_owned_process(process)
+
+    def close_collection_browser(self) -> None:
+        """End only the app-owned CDP collection browser.
+
+        Queue tasks may use different platform profiles.  Keeping a completed
+        task's collection Chrome alive would prevent the next task from
+        switching profiles, while an interactive login Chrome must remain
+        under the user's control.
+        """
+        process = self.collection_process
+        self.collection_process = None
+        self.port = None
+        self.chrome_path = None
+        if process and process.poll() is None:
+            self._terminate_owned_process(process)

@@ -415,6 +415,59 @@ def test_stop_prevents_following_tasks(monkeypatch, tmp_path: Path) -> None:
     assert [task.status for task in tasks] == ["stopped", "stopped"]
 
 
+def test_queue_runner_closes_collection_browser_between_platform_profiles(monkeypatch, tmp_path: Path) -> None:
+    """A completed task must not keep CDP Chrome attached to its profile."""
+    order: list[str] = []
+
+    class FakeBrowserManager:
+        def __init__(self) -> None:
+            self.profile_dir = None
+            self.collection_open = False
+            self.closed_profiles: list[Path] = []
+
+        def set_profile_dir(self, profile_dir: Path) -> None:
+            if self.collection_open and profile_dir != self.profile_dir:
+                raise RuntimeError("当前浏览器仍在运行，不能切换浏览器 Profile。")
+            self.profile_dir = profile_dir
+
+        def close_collection_browser(self) -> None:
+            if self.collection_open:
+                self.closed_profiles.append(self.profile_dir)
+            self.collection_open = False
+
+    browser_manager = FakeBrowserManager()
+
+    class FakeEngine:
+        def __init__(self, config, profile_dir, on_log, on_stats) -> None:
+            self.config = config
+            self.browser_manager = None
+
+        def run(self):
+            order.append(self.config.canonical_platform())
+            browser_manager.collection_open = True
+
+        def pause(self):
+            return None
+
+        def resume(self):
+            return None
+
+        def stop(self):
+            return None
+
+    monkeypatch.setattr(runner_module, "DownloadEngine", FakeEngine)
+    tasks = [
+        QueueTask(TaskConfig("one", 1, tmp_path, platform="pinterest", collection_mode="search")),
+        QueueTask(TaskConfig("two", 1, tmp_path, platform="x", collection_mode="search", source_identifier="two")),
+    ]
+    runner_module.QueueRunner(tasks, tmp_path / "profile", QueueStore(tmp_path / "queue.json"), browser_manager).run()
+
+    assert order == ["pinterest", "x"]
+    assert [task.status for task in tasks] == ["completed", "completed"]
+    assert len(browser_manager.closed_profiles) == 2
+    assert not browser_manager.collection_open
+
+
 def test_queue_persistence_recovers_interrupted_running_task(tmp_path: Path) -> None:
     store = QueueStore(tmp_path / "queue.json")
     tasks = _runner_tasks("one")

@@ -111,6 +111,13 @@ class QueueRunner(QThread):
                 finally:
                     self.current_engine = None
                     self.current_task = None
+                    # A queue can cross platform profiles.  Engine closes its
+                    # Playwright collector, but the app-owned CDP Chrome is
+                    # managed separately and would otherwise block the next
+                    # profile switch.  Deliberately leave any login browser
+                    # untouched.
+                    if self.browser_manager:
+                        self.browser_manager.close_collection_browser()
             self.store.save(self.tasks)
         finally:
             self.finished_queue.emit()

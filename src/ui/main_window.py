@@ -1300,6 +1300,9 @@ class MainWindow(QMainWindow):
         if self._has_disabled_pending_platform():
             QMessageBox.warning(self, "无法开始队列", "该平台正在开发中，当前版本暂不支持实际采集。")
             return
+        if self.browser_manager.is_login_running():
+            QMessageBox.warning(self, "无法开始队列", "登录浏览器仍在运行。请完成登录并关闭该浏览器后，再开始采集。")
+            return
         profile = browser_profile_directory()
         if not self.browser_manager.is_running() and BrowserSession.profile_is_locked(profile):
             QMessageBox.warning(self, "无法开始队列", "请先关闭登录浏览器，再开始采集。")
