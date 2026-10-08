@@ -9,8 +9,8 @@ $ErrorActionPreference = 'Stop'
 $projectRoot = Split-Path $PSScriptRoot -Parent
 Set-Location $projectRoot
 
-$expectedCommit = '4f0abb2606e2c63423b13e8a072ec7fbaa79d036'
-$expectedVersion = '1.32.10'
+$expectedCommit = '8b9a56d6b1a53bc13a80894625fd58b24de3063a'
+$expectedVersion = '1.32.14'
 $python = Join-Path $projectRoot '.venv\Scripts\python.exe'
 $entryPoint = Join-Path $projectRoot 'src\adapters\gallerydl_helper_entry.py'
 $requirements = Join-Path $PSScriptRoot 'gallerydl_helper_runtime_requirements.txt'

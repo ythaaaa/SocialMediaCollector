@@ -31,7 +31,7 @@ Instagram 当前支持的是 Hashtag / 标签采集，不是普通关键词全�
 
 当前开发版已完成：
 
-- gallery-dl 1.32.10 packaged helper
+- gallery-dl 1.32.14 packaged helper
 - Single Post、Reel、Author、Hashtag
 - Carousel
 - Image / Video / Mixed
@@ -76,7 +76,7 @@ Board 模式输入具体 Board / 画板链接，只采集该 Board 的 Pins；�
 - Search
 - Media / Top scope
 - Image / Video / Mixed
-- gallery-dl 1.32.10 packaged helper
+- gallery-dl 1.32.14 packaged helper
 - 原图优先
 - Direct MP4 / HLS
 - Animated GIF → video
@@ -145,7 +145,7 @@ README 不包含 Cookie、账号凭据或内部安全实现细节。
 
 gallery-dl 说明：
 
-- Version `1.32.10`
+- Version `1.32.14`
 - 使用未修改的 upstream 源码
 - 作为独立 packaged helper process 分发
 - 通过 JSONL IPC 与主程序通信
@@ -154,7 +154,7 @@ gallery-dl 说明：
 
 ### gallery-dl
 
-- Version: `1.32.10`
+- Version: `1.32.14`
 - License: GPL-2.0
 - Upstream: [mikf/gallery-dl](https://github.com/mikf/gallery-dl)
 - 发行包中的完整材料：`licenses/gallery-dl/`

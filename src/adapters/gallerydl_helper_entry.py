@@ -10,8 +10,8 @@ from src.adapters import gallerydl_worker
 
 
 HELPER_NAME = "instagram-gallerydl-helper"
-GALLERYDL_VERSION = "1.32.10"
-GALLERYDL_COMMIT = "4f0abb2606e2c63423b13e8a072ec7fbaa79d036"
+GALLERYDL_VERSION = "1.32.14"
+GALLERYDL_COMMIT = "8b9a56d6b1a53bc13a80894625fd58b24de3063a"
 
 
 def version_text() -> str:

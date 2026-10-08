@@ -143,7 +143,7 @@ def test_adapter_log_reports_packaged_helper_version_without_cookie_values():
 
     secret = "fixture-sessionid-must-not-log"
     fake = PackagedClient([
-        {"type": "ready", "cookie_loaded": True, "gallery_dl_version": "1.32.10"},
+        {"type": "ready", "cookie_loaded": True, "gallery_dl_version": "1.32.14"},
         {"type": "exhausted"},
     ])
     logs: list[str] = []
@@ -158,7 +158,7 @@ def test_adapter_log_reports_packaged_helper_version_without_cookie_values():
         on_candidate=lambda _candidate: True,
         on_log=logs.append,
     ) == 0
-    assert "Instagram engine=gallery-dl 1.32.10; helper=packaged; cookie loaded=yes" in logs
+    assert "Instagram engine=gallery-dl 1.32.14; helper=packaged; cookie loaded=yes" in logs
     assert all(secret not in message for message in logs)
 
 
@@ -362,8 +362,8 @@ def test_worker_malformed_json_returns_jsonl_error_without_crashing(monkeypatch,
 def test_helper_version_contains_fixed_gallerydl_provenance():
     assert gallerydl_helper_entry.version_text().splitlines() == [
         "instagram-gallerydl-helper",
-        "gallery-dl 1.32.10",
-        "gallery-dl commit 4f0abb2606e2c63423b13e8a072ec7fbaa79d036",
+        "gallery-dl 1.32.14",
+        "gallery-dl commit 8b9a56d6b1a53bc13a80894625fd58b24de3063a",
     ]
 
 

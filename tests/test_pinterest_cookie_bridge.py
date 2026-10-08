@@ -135,7 +135,7 @@ def test_search_missing_store_fails_auth_before_starting_helper(monkeypatch):
 def test_search_passes_loaded_cookie_dict_and_never_logs_values():
     secret = "session-secret"
     fake = _FakeClient([
-        {"type": "ready", "cookie_loaded": True, "gallery_dl_version": "1.32.10"},
+        {"type": "ready", "cookie_loaded": True, "gallery_dl_version": "1.32.14"},
         {"type": "exhausted"},
     ])
     captured: dict[str, object] = {}
@@ -226,7 +226,7 @@ def test_worker_converts_pinterest_auth_exception_to_auth_required(monkeypatch, 
     fake_extractor = SimpleNamespace(find=lambda _url: instance)
     fake_config = SimpleNamespace(set=lambda *_args, **_kwargs: None)
     fake_gallery = ModuleType("gallery_dl")
-    fake_gallery.__version__ = "1.32.10"
+    fake_gallery.__version__ = "1.32.14"
     fake_gallery.config = fake_config
     fake_gallery.extractor = fake_extractor
     monkeypatch.setitem(sys.modules, "gallery_dl", fake_gallery)

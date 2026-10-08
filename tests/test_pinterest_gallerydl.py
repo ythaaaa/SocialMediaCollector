@@ -339,7 +339,7 @@ class FakePinterestClient:
 
 def test_pinterest_adapter_streams_packaged_candidates_with_backpressure():
     fake = FakePinterestClient([
-        {"type": "ready", "cookie_loaded": False, "gallery_dl_version": "1.32.10"},
+        {"type": "ready", "cookie_loaded": False, "gallery_dl_version": "1.32.14"},
         pinterest_image_event(),
     ])
     logs: list[str] = []
@@ -355,7 +355,7 @@ def test_pinterest_adapter_streams_packaged_candidates_with_backpressure():
     ) == 1
     assert fake.commands == ["start", "next"]
     assert fake.stopped
-    assert "Pinterest engine=gallery-dl 1.32.10; helper=packaged; cookie loaded=no" in logs
+    assert "Pinterest engine=gallery-dl 1.32.14; helper=packaged; cookie loaded=no" in logs
     assert seen[0].media_identity == "123456789:0"
 
 
@@ -419,7 +419,7 @@ def test_pinterest_worker_search_and_pin_extractors_are_selected_lazily(monkeypa
     fake_extractor = SimpleNamespace(find=lambda url: instance)
     fake_config = SimpleNamespace(set=lambda *args, **kwargs: None)
     fake_gallery = ModuleType("gallery_dl")
-    fake_gallery.__version__ = "1.32.10"
+    fake_gallery.__version__ = "1.32.14"
     fake_gallery.config = fake_config
     fake_gallery.extractor = fake_extractor
     monkeypatch.setitem(sys.modules, "gallery_dl", fake_gallery)
@@ -437,7 +437,7 @@ def test_pinterest_worker_search_and_pin_extractors_are_selected_lazily(monkeypa
         "media_type": "mixed",
     }) == 0
     assert output[0]["type"] == "ready"
-    assert output[0]["gallery_dl_version"] == "1.32.10"
+    assert output[0]["gallery_dl_version"] == "1.32.14"
     assert output[1]["platform"] == "pinterest"
     assert output[1]["media_identity"] == "123456789:0"
     assert captured == [{"initialized": True}, {"items": True}]
@@ -476,7 +476,7 @@ def test_pinterest_worker_selects_user_or_board_without_queueing_sections(
     fake_extractor = SimpleNamespace(find=lambda _url: instance)
     fake_config = SimpleNamespace(set=lambda *args, **kwargs: settings.append(args))
     fake_gallery = ModuleType("gallery_dl")
-    fake_gallery.__version__ = "1.32.10"
+    fake_gallery.__version__ = "1.32.14"
     fake_gallery.config = fake_config
     fake_gallery.extractor = fake_extractor
     monkeypatch.setitem(sys.modules, "gallery_dl", fake_gallery)

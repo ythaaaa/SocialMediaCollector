@@ -129,7 +129,7 @@ class FakeClient:
 
 
 def test_x_adapter_filters_ownership_quote_retweet_and_media_in_worker_configuration():
-    fake = FakeClient([{"type": "ready", "cookie_loaded": True, "gallery_dl_version": "1.32.10"}, x_event(username="other"), x_event(), {"type": "exhausted"}])
+    fake = FakeClient([{"type": "ready", "cookie_loaded": True, "gallery_dl_version": "1.32.14"}, x_event(username="other"), x_event(), {"type": "exhausted"}])
     accepted, discovered, skipped, logs = [], [], [], []
     adapter = XGalleryDlAdapter(cookies={"auth_token": "secret", "ct0": "secret2"}, client_factory=lambda *_a, **_k: fake)
     adapter.collect("https://x.com/alice/media", source_type="author", source_username="alice", media_type="image",
@@ -202,7 +202,7 @@ def test_x_worker_sets_twitter_configuration_and_uses_search_extractor(monkeypat
         def items(self): return iter(())
     fake_extractor = SimpleNamespace(find=lambda _url: Instance())
     fake_config = SimpleNamespace(set=lambda *args: settings.append(args))
-    fake_gallery = ModuleType("gallery_dl"); fake_gallery.__version__ = "1.32.10"
+    fake_gallery = ModuleType("gallery_dl"); fake_gallery.__version__ = "1.32.14"
     fake_gallery.config, fake_gallery.extractor = fake_config, fake_extractor
     monkeypatch.setitem(sys.modules, "gallery_dl", fake_gallery)
     monkeypatch.setitem(sys.modules, "gallery_dl.config", fake_config)
