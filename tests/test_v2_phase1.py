@@ -65,7 +65,7 @@ def test_task_config_exposes_v2_queue_fields_and_reads_legacy_data() -> None:
 
 
 def test_v2_release_candidate_version() -> None:
-    assert APP_VERSION == "2.1.0-dev"
+    assert APP_VERSION == "2.1.0-dev.2"
 
 
 def test_platform_registry_declares_current_and_reserved_capabilities() -> None:

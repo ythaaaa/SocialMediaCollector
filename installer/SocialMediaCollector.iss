@@ -1,5 +1,5 @@
 #define MyAppName "Social Media Collector"
-#define MyAppVersion "2.1.0-dev"
+#define MyAppVersion "2.1.0-dev.2"
 #define MyAppPublisher ""
 #define MyAppExeName "SocialMediaCollector.exe"
 
@@ -17,13 +17,13 @@ PrivilegesRequired=lowest
 ArchitecturesAllowed=x64
 ArchitecturesInstallIn64BitMode=x64
 OutputDir=..\release
-OutputBaseFilename=SocialMediaCollector-Setup-v2.1.0-dev
+OutputBaseFilename=SocialMediaCollector-Setup-v2.1.0-dev.2
 SetupIconFile=..\assets\app_icon.ico
 UninstallDisplayIcon={app}\{#MyAppExeName}
 VersionInfoDescription={#MyAppName}
 VersionInfoProductName={#MyAppName}
-VersionInfoProductVersion=2.1.0
-VersionInfoVersion=2.1.0.0
+VersionInfoProductVersion=2.1.0.2
+VersionInfoVersion=2.1.0.2
 WizardStyle=modern
 Compression=lzma2
 SolidCompression=yes

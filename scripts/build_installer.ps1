@@ -117,7 +117,7 @@ if ($ffmpegInfo -match '--enable-gpl|--enable-nonfree') {
 }
 
 $iss = Join-Path $projectRoot 'installer\SocialMediaCollector.iss'
-$output = Join-Path $projectRoot 'release\SocialMediaCollector-Setup-v2.1.0-dev.exe'
+$output = Join-Path $projectRoot 'release\SocialMediaCollector-Setup-v2.1.0-dev.2.exe'
 if (-not (Test-Path -LiteralPath $iss -PathType Leaf)) {
     throw "Inno Setup source file is missing: $iss"
 }
