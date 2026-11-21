@@ -5,10 +5,23 @@ __pycache__/
 build/
 dist/
 release/
+/build*/
+/dist*/
 *.spec
 browser-data/
+browser-data-*/
 downloads/
 验证 输出/
 EXE 验证 输出/
 *.log
 .env
+/diagnostics-output/
+*.db
+*.db-*
+*.sqlite
+*.sqlite3
+*.part
+cookies*.txt
+*.cookies.txt
+.env.*
+!.env.example

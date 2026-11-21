@@ -1,24 +1,15 @@
 param(
     [string]$BuildRoot = '',
     [string]$DistRoot = '',
-    [string]$GalleryDlHelperRelease = ''
+    [string]$GalleryDlHelperRelease = '',
+    [string]$PythonPath = ''
 )
 
 $ErrorActionPreference = 'Stop'
 $projectRoot = Split-Path $PSScriptRoot -Parent
 Set-Location $projectRoot
 
-if (-not $BuildRoot) { $BuildRoot = Join-Path $projectRoot 'build' }
-if (-not $DistRoot) { $DistRoot = Join-Path $projectRoot 'dist' }
-$BuildRoot = [IO.Path]::GetFullPath($BuildRoot)
-$DistRoot = [IO.Path]::GetFullPath($DistRoot)
-foreach ($target in @($BuildRoot, $DistRoot)) {
-    if (Test-Path -LiteralPath $target) {
-        Remove-Item -LiteralPath $target -Recurse -Force
-    }
-}
-
-$python = Join-Path $projectRoot '.venv\Scripts\python.exe'
+$python = if ($PythonPath) { [IO.Path]::GetFullPath($PythonPath) } else { Join-Path $projectRoot '.venv\Scripts\python.exe' }
 $uiResources = Join-Path $projectRoot 'src\ui\resources'
 $assets = Join-Path $projectRoot 'assets'
 $vendorRuntime = Join-Path $projectRoot 'vendor\ffmpeg'
@@ -28,6 +19,14 @@ $ffmpeg = Join-Path $projectRoot 'vendor\ffmpeg\ffmpeg.exe'
 $license = Join-Path $projectRoot 'vendor\ffmpeg\LICENSE.txt'
 $systemIcu = Join-Path $env:SystemRoot 'System32\icuuc.dll'
 $deno = Join-Path $env:USERPROFILE '.deno\bin\deno.exe'
+$sslModule = & $python -c "import ssl; print(ssl.__file__)"
+if ($LASTEXITCODE -ne 0 -or -not $sslModule) { throw '无法解析 Python SSL 模块路径' }
+$sslSource = Get-Content -LiteralPath $sslModule -Raw
+$BuildRoot = if ($BuildRoot) { [IO.Path]::GetFullPath($BuildRoot) } else { Join-Path $projectRoot 'build' }
+$DistRoot = if ($DistRoot) { [IO.Path]::GetFullPath($DistRoot) } else { Join-Path $projectRoot 'dist' }
+if ($sslSource.Contains('codex-rejected-cas.pem')) {
+    throw '当前 Python SSL 模块包含本机专用 CA policy 修改。请使用未修改的官方 CPython 3.12 环境构建，避免将本机信任策略复制到应用。'
+}
 foreach ($required in @($python, $ffmpeg, $license, $systemIcu, $deno)) {
     if (-not (Test-Path -LiteralPath $required -PathType Leaf)) {
         throw "缺少发布资源：$required"
@@ -44,6 +43,13 @@ if ($GalleryDlHelperRelease) {
     $helperInternal = Join-Path $helperRelease '_internal'
     if (-not (Test-Path -LiteralPath $helperExe -PathType Leaf) -or -not (Test-Path -LiteralPath $helperInternal -PathType Container)) {
         throw "gallery-dl helper onedir 不完整：$helperRelease"
+    }
+}
+
+# Validate all inputs before replacing any previous build output.
+foreach ($target in @($BuildRoot, $DistRoot)) {
+    if (Test-Path -LiteralPath $target) {
+        Remove-Item -LiteralPath $target -Recurse -Force
     }
 }
 

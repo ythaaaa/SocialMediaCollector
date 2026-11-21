@@ -21,8 +21,24 @@ def create_task_directory(root: Path, keyword: str) -> Path:
 
 def application_data_directory() -> Path:
     """A writable, stable location for browser state outside source/build folders."""
+    diagnostics_root = os.environ.get("SMC_DIAGNOSTICS_HOME")
+    if diagnostics_root:
+        directory = Path(diagnostics_root).expanduser().resolve()
+        directory.mkdir(parents=True, exist_ok=True)
+        return directory
     base = Path(os.environ.get("LOCALAPPDATA", Path.home() / "AppData" / "Local"))
     directory = base / "PinterestLocalDownloader"
+    directory.mkdir(parents=True, exist_ok=True)
+    return directory
+
+
+def diagnostics_directory() -> Path:
+    """Return the one directory used for diagnostic logs and runtime data."""
+    configured = os.environ.get("SMC_DIAGNOSTICS_HOME")
+    if configured:
+        directory = Path(configured).expanduser().resolve()
+    else:
+        directory = application_data_directory() / "diagnostics"
     directory.mkdir(parents=True, exist_ok=True)
     return directory
 

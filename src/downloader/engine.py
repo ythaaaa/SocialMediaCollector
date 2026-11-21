@@ -4,7 +4,10 @@ import hashlib
 import io
 import inspect
 import logging
+import os
+import sys
 import time
+import traceback
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -13,6 +16,7 @@ from typing import Callable
 from urllib.parse import urlsplit, urlunsplit
 
 import httpx
+import certifi
 from PIL import Image, UnidentifiedImageError
 
 from src.browser import (
@@ -24,6 +28,7 @@ from src.downloader.hls import HLSDownloadCancelled, HLSDownloadError, HLSDownlo
 from src.downloader.dash import DASHDownloadCancelled, DASHDownloadError, DASHDownloader
 from src.storage import CollectorDatabase, TaskStore
 from src.utils.paths import create_task_directory
+from src.utils.diagnostics import log_exception, log_task_stage
 from src.utils.instagram import instagram_hashtag_url, normalize_hashtag
 from src.adapters.instagram_gallerydl import (
     GalleryDlError,
@@ -73,8 +78,29 @@ class DownloadEngine:
         self.stats = TaskStats()
         self.task_dir: Path | None = None
         self.task_output_dir: Path | None = None
+        self._diagnostic_stage = "task initialization"
         self._current_task_candidate_keys: set[tuple[str, str]] = set()
         self._current_task_hashes: set[str] = set()
+
+    @property
+    def diagnostic_stage(self) -> str:
+        return self._diagnostic_stage
+
+    @diagnostic_stage.setter
+    def diagnostic_stage(self, stage: str) -> None:
+        if stage == getattr(self, "_diagnostic_stage", None):
+            return
+        self._diagnostic_stage = stage
+        try:
+            log_task_stage(
+                stage,
+                task_id=self.config.task_id,
+                platform=self.config.canonical_platform(),
+                mode=self.config.canonical_collection_mode(),
+            )
+        except OSError:
+            # Diagnostics storage must not interrupt a real collection task.
+            pass
 
     def pause(self) -> None:
         self.pause_event.clear()
@@ -98,6 +124,7 @@ class DownloadEngine:
         self.on_stats(self.stats)
 
     def run(self) -> Path:
+        self.diagnostic_stage = "task configuration"
         self._current_task_candidate_keys.clear()
         self._current_task_hashes.clear()
         platform = self.config.canonical_platform()
@@ -212,8 +239,11 @@ class DownloadEngine:
             }[mode]
         # ``config.output_root`` is always the user-selected save root. The
         # generated task directory is a separate runtime-only value.
+        self.diagnostic_stage = "task directory creation"
+        self.on_log(f"[diag] stage={self.diagnostic_stage} task_id={self.config.task_id} output_root={self.config.output_root}")
         self.task_output_dir = create_task_directory(self.config.output_root, task_name)
         self.task_dir = self.task_output_dir
+        self.on_log(f"[diag] task directory ready path={self.task_output_dir}")
         if self.on_task_dir:
             self.on_task_dir(self.task_output_dir)
         if platform == "youtube":
@@ -227,6 +257,8 @@ class DownloadEngine:
             collector = PinterestCollector(self.profile_dir, self.on_log)
         store: TaskStore | None = None
         try:
+            self.diagnostic_stage = "browser connection"
+            self.on_log(f"[diag] stage={self.diagnostic_stage} executable={__import__('sys').executable} resource_root={getattr(__import__('sys'), '_MEIPASS', '')}")
             self._emit("正在准备采集并下载素材")
             if gallerydl_enabled:
                 self._emit(f"正在使用 gallery-dl 发现 {platform.title()} 素材")
@@ -234,14 +266,25 @@ class DownloadEngine:
                 collector.connect_over_cdp(self.browser_manager.endpoint)
             else:
                 collector.open()
+            self.diagnostic_stage = "page read"
             page = collector.prepare_current_page() if collector is not None and mode == "current_page" and hasattr(collector, "prepare_current_page") else getattr(collector, "page", None)
             if mode == "current_page" and page:
                 self.config = replace(self.config, source_page_url=page.url)
+                self.on_log(f"[diag] current page selected host={urlsplit(page.url).hostname or ''}")
             self.database.start_task(self.config, self.task_output_dir)
             store = TaskStore(self.task_output_dir, self.config)
             known = store.known_hashes()
             self._current_task_hashes.update(known)
+            self.diagnostic_stage = "HTTP/TLS client initialization"
+            cert_path = Path(certifi.where())
+            self.on_log(
+                f"[diag] stage={self.diagnostic_stage} certifi_path={cert_path} "
+                f"certifi_exists={cert_path.is_file()} certifi_size={cert_path.stat().st_size if cert_path.is_file() else 0} "
+                f"SSL_CERT_FILE={os.environ.get('SSL_CERT_FILE', '')!r} "
+                f"SSL_CERT_DIR={os.environ.get('SSL_CERT_DIR', '')!r}"
+            )
             with httpx.Client(headers={"User-Agent": "Mozilla/5.0"}, follow_redirects=True, timeout=30) as client:
+                self.diagnostic_stage = "page read"
                 on_candidate = lambda candidate: self._process_candidate(client, candidate, store, known)
                 should_finish = lambda: self.stats.downloaded >= self.config.target_count
                 if gallerydl_enabled:
@@ -336,6 +379,7 @@ class DownloadEngine:
                         collect_args += (self.config.canonical_media_type(),)
                     candidates = collector.collect_home(*collect_args)
                 else:
+                    self.diagnostic_stage = "resource parsing"
                     collect_args = (self.config.target_count, self.config.max_scrolls, self.stop_event.is_set, self._wait_if_paused, self._on_found, on_candidate, should_finish)
                     if "media_type" in inspect.signature(collector.collect_current_page).parameters:
                         collect_args += (self.config.canonical_media_type(),)
@@ -360,6 +404,8 @@ class DownloadEngine:
             )
             self._emit(status)
         except Exception as exc:
+            log_exception(exc, config=self.config, context={"stage": self.diagnostic_stage})
+            self.on_log(f"[diag] failure stage={self.diagnostic_stage} type={type(exc).__name__} errno={getattr(exc, 'errno', '')} filename={getattr(exc, 'filename', '')} filename2={getattr(exc, 'filename2', '')}")
             stopped = self.stop_event.is_set()
             if store is not None:
                 store.complete(self.stats, stopped, str(exc))
@@ -908,6 +954,7 @@ class DownloadEngine:
             remaining -= delay
 
     def _download_one(self, client: httpx.Client, candidate: ImageCandidate, store: TaskStore, known: set[str]) -> None:
+        self.diagnostic_stage = "file write" if self.task_dir else "download dispatch"
         platform = self.config.canonical_platform()
         record_keyword = self.config.keyword or self.config.source_identifier
         media_url = candidate.media_url or candidate.image_url
@@ -1008,9 +1055,18 @@ class DownloadEngine:
         except (httpx.HTTPError, HLSDownloadError, DASHDownloadError, UnidentifiedImageError, OSError, ValueError) as exc:
             self.stats.failed += 1; record.status, record.reason = "failed", str(exc); store.append(record)
             suffix = "；当前视频已跳过，将继续处理后续候选。" if candidate.media_type == "video" else ""
+            log_exception(exc, config=self.config, context={"stage": self.diagnostic_stage})
+            if isinstance(exc, FileNotFoundError):
+                self.on_log(
+                    f"[diag] FileNotFoundError stage={self.diagnostic_stage} errno={exc.errno} "
+                    f"strerror={exc.strerror} filename={exc.filename!r} filename2={getattr(exc, 'filename2', None)!r} "
+                    f"cwd={os.getcwd()} program={sys.executable} resource_root={getattr(sys, '_MEIPASS', '')!r} "
+                    f"task_id={self.config.task_id} task_dir={self.task_dir}\n{traceback.format_exc()}"
+                )
             self.on_log(f"下载失败：{media_url} - {exc}{suffix}")
 
     def _download_video(self, client: httpx.Client, candidate: ImageCandidate, record: DownloadRecord, store: TaskStore, known: set[str]) -> None:
+        self.diagnostic_stage = "downloader selection"
         assert self.task_dir
         videos_dir = self.task_dir / "videos"
         videos_dir.mkdir(exist_ok=True)
@@ -1045,6 +1101,7 @@ class DownloadEngine:
                 try:
                     self.on_log(f"{stage_label}=downloading_{source.kind}")
                     if source.kind == "hls":
+                        self.diagnostic_stage = "external process startup: ffmpeg/hls"
                         hls_downloader = HLSDownloader(
                             client,
                             {"Referer": referer, "User-Agent": "Mozilla/5.0"},
@@ -1057,6 +1114,7 @@ class DownloadEngine:
                             result = hls_downloader.validate_output(part_path, result)
                             self.on_log(f"{stage_label}=integrity_pass")
                     elif source.kind == "dash":
+                        self.diagnostic_stage = "external process startup: ffmpeg/dash"
                         result = DASHDownloader(
                             client,
                             {"Referer": referer, "User-Agent": "Mozilla/5.0"},

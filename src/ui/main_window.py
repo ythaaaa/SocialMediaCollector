@@ -33,6 +33,7 @@ from src.tasks import BatchInputError, QueueTask, build_batch_configs, remove_qu
 from src.ui.input_state import ModeInputState
 from src.ui.resources import app_icon_path, resource_path, set_windows_app_user_model_id, stylesheet
 from src.utils.paths import application_data_directory, browser_profile_directory, profile_directory_for_platform
+from src.utils.diagnostics import log_exception, runtime_log_path
 from src.utils.instagram import normalize_hashtag
 from src.utils.youtube import normalize_youtube_search_keywords
 from src.version import APP_VERSION
@@ -51,43 +52,11 @@ def _sanitize_runtime_text(value: object) -> str:
 
 
 def _runtime_log_path() -> Path:
-    for root in (Path.cwd(), application_data_directory()):
-        try:
-            directory = root / "logs"
-            directory.mkdir(parents=True, exist_ok=True)
-            return directory / "runtime-crash.log"
-        except OSError:
-            continue
-    return Path("runtime-crash.log")
+    return runtime_log_path()
 
 
 def _write_runtime_exception(exc: BaseException, config: TaskConfig | None = None, context: dict[str, object] | None = None) -> None:
-    details = dict(context or {})
-    if config is not None:
-        details.update(
-            task_id=config.task_id,
-            platform=config.canonical_platform(),
-            collection_mode=config.canonical_collection_mode(),
-        )
-    details.setdefault("task_id", "")
-    details.setdefault("platform", "")
-    details.setdefault("collection_mode", "")
-    lines = [
-        f"timestamp={datetime.now().isoformat(timespec='seconds')}",
-        f"thread={threading.current_thread().name}",
-        f"task_id={_sanitize_runtime_text(details['task_id'])}",
-        f"platform={_sanitize_runtime_text(details['platform'])}",
-        f"collection_mode={_sanitize_runtime_text(details['collection_mode'])}",
-        f"exception_type={type(exc).__name__}",
-        f"message={_sanitize_runtime_text(exc)}",
-        "traceback:",
-        _sanitize_runtime_text("".join(traceback.format_exception(type(exc), exc, exc.__traceback__))),
-        "-" * 80,
-    ]
-    try:
-        _runtime_log_path().open("a", encoding="utf-8").write("\n".join(lines) + "\n")
-    except OSError:
-        pass
+    log_exception(exc, config=config, context=context)
 
 
 def _install_runtime_exception_hooks() -> None:
@@ -166,9 +135,11 @@ class Worker(QThread):
         try:
             self.done.emit(str(self.engine.run()))
         except BaseException as exc:
-            _write_runtime_exception(exc, self.engine.config)
+            _write_runtime_exception(exc, self.engine.config, {"stage": getattr(self.engine, "diagnostic_stage", "task execution")})
             try:
-                self.failed.emit(str(exc) or type(exc).__name__)
+                stage = getattr(self.engine, "diagnostic_stage", "task execution")
+                log_path = _runtime_log_path()
+                self.failed.emit(f"任务在阶段‘{stage}’失败：{str(exc) or type(exc).__name__}\n诊断日志：{log_path}")
             except BaseException as signal_exc:
                 _write_runtime_exception(signal_exc, self.engine.config, {"callback": "Worker.failed"})
 
@@ -396,6 +367,9 @@ class MainWindow(QMainWindow):
 
         default_save_root = str(Path.home() / "Pinterest素材")
         saved_save_root = str(self.settings.value("save_root", "") or "").strip()
+        if os.environ.get("SMC_DIAGNOSTICS_HOME"):
+            default_save_root = str(application_data_directory() / "test-downloads")
+            saved_save_root = ""
         self.output = QLineEdit(saved_save_root or default_save_root)
         self.output.setMinimumHeight(38)
         self.output.textChanged.connect(self._remember_save_root)
